@@ -26,8 +26,8 @@ available (see the protocol table below).
 | Environment | What ran |
 |---|---|
 | macOS 27 arm64, Go 1.27.4, libopus 1.6.1, opusfile 0.12, libsoxr 0.1.3 | Unit tests with `-race`, integration tests against `livekit-server` 1.13.11 |
-| Linux arm64 in Docker (`golang:1.27-bookworm` → `debian:bookworm-slim`) | Image build; the example worker registered with `livekit-server` 1.13.11 |
-| Linux amd64 | Not run. The CI workflow targets it but has not executed yet |
+| Linux arm64 in Docker (`golang:1.27-bookworm` → `debian:bookworm-slim`) | Image build; the example worker registered with `livekit-server` 1.13.11; the Silero model loads at startup |
+| Linux amd64 (GitHub Actions, Ubuntu 26.04) | Unit tests with `-race`, integration tests against `livekit-server`, image build, on every push |
 | Windows | Not tested |
 | LiveKit Cloud (server 1.13.10), from macOS | `TestVoiceAgentVerticalSlice`: registration, explicit dispatch, room join, audio both ways, interruption, shutdown. Automatic dispatch was not run there |
 | Live provider APIs (Deepgram, Anthropic, OpenAI), 2026-11-13 | Provider `e2e` tests and `test/e2e` (pipeline with Deepgram STT and TTS and the Anthropic LLM). |
@@ -74,7 +74,7 @@ identical behaviour to upstream.
 | LiveKit Cloud managed deployment | Yes, with `lk agent` | Experimental, with `cmd/lkagent`; not yet run on Cloud |
 | STT → LLM → TTS pipeline | Yes | Yes |
 | Speech-to-speech realtime models | Yes | No (interfaces only) |
-| VAD | Silero (model) | Energy-based only; interface for others |
+| VAD | Silero (model) | Silero (same model file, see below) and an energy detector |
 | Turn detection | VAD, STT, realtime, turn-detector model | VAD, STT, manual; interface for a model |
 | Interruptions | Yes | Yes |
 | Adaptive / false-interruption handling | Yes | No |
@@ -110,6 +110,31 @@ identical behaviour to upstream.
 | Tool steps per turn | 3 | 3 |
 | TTS input | Streaming when the provider supports it | One request per sentence |
 
+## Silero VAD
+
+`vad/silero` follows `livekit-plugins-silero` 1.8.12.
+
+| Item | Upstream | This SDK |
+|---|---|---|
+| Model file | `silero_vad.onnx`, SHA-256 `1a153a22…88e3` | The same file, embedded. It is also the file of Silero VAD release 6.2.3 |
+| Runtime | ONNX Runtime, CPU, one thread, no spinning | Same settings, ONNX Runtime 1.32.0 through `yalue/onnxruntime_go` (built with the 1.31 headers; 1.31.1 was tested too) |
+| Window and context | 512 + 64 samples at 16 kHz, 256 + 32 at 8 kHz | Same |
+| Defaults | 50 ms speech, 550 ms silence, activation 0.5, deactivation 0.35 | Same |
+| Output smoothing | Exponential filter, 0.35 | Same |
+| Resampling to the model rate | libsoxr, lowest quality | Averaging or linear interpolation, in Go |
+| Speech audio buffer, prefix padding, per-window inference events | Yes | No: the detector reports speech boundaries only |
+
+Checked: on a synthesized sentence the start is reported 64 ms after the first word and
+the end 576 ms after the last one; silence, a 440 Hz tone, white noise and keyboard-like
+clicks produce no event; the pipeline test with live providers passes with it.
+
+Compared with the Python plugin on the same 6.3 s clip (`TestMatchesUpstreamPlugin`,
+reference from `vad/silero/testdata/reference.py` with `livekit-plugins-silero` 1.8.12
+and ONNX Runtime 1.32.0): over 196 windows the model output and the smoothed probability
+differ by at most 0.000001, and the start and end events fall on the same sample with
+the same durations. Not checked: input that needs resampling was not compared with
+upstream, and no noisy real-room recording was tested.
+
 ## Provider notes
 
 All three providers were written against the vendors' documentation as of 2026-11-12.
@@ -128,8 +153,8 @@ Their unit tests use local servers that replay documented message shapes. The op
 
 | Milestone | Content |
 |---|---|
-| 0.2 Hardening | First managed deployment on LiveKit Cloud with `lkagent`. More real-voice testing (noise, echo, several languages). Linux amd64 CI run. |
-| 0.3 Turn quality | Model-based VAD (Silero) behind `vad.VAD`. Turn-detector model behind `TurnDetector`. False-interruption recovery. Preemptive generation. |
+| 0.2 Hardening | First managed deployment on LiveKit Cloud with `lkagent`. More real-voice testing (noise, echo, several languages). |
+| 0.3 Turn quality | Silero VAD: done. Turn-detector model behind `TurnDetector`. False-interruption recovery. Preemptive generation. |
 | 0.4 Realtime | Wire `realtime.Model` into the session, with one provider. |
 | 0.5 Audio | Streaming-input TTS with aligned transcripts. Evaluate a cgo-free Opus path with `pion/opus`. |
 | Later | Handoffs and tasks, text input, telephony helpers, video, more providers, OpenTelemetry export, newer `protocol` messages (`GoAway`, join timing, job tokens). |

@@ -49,7 +49,7 @@ Still unverified there:
 
 | Concern | Recommendation |
 |---|---|
-| Image | The provided `Dockerfile` builds an example. Copy it and point `EXAMPLE` (or the build path) at your agent. Runtime needs `libopus0`, `libopusfile0`, `libsoxr0` and CA certificates. |
+| Image | The provided `Dockerfile` builds an example. Copy it and point `EXAMPLE` (or the build path) at your agent. Runtime needs `libopus0`, `libopusfile0`, `libsoxr0`, CA certificates and, for the Silero VAD, the ONNX Runtime library (`scripts/install-onnxruntime.sh`). |
 | Shutdown | `SIGTERM` starts a drain. Set the platform's termination grace period above `WorkerOptions.DrainTimeout`, which should exceed your longest expected conversation (default 1 minute). |
 | Capacity | Set `WorkerOptions.MaxConcurrentJobs` from load tests. Each job holds one WebRTC connection, an Opus encoder and decoder, and the provider streams. Add `LoadThreshold` with a `LoadFunc` to also decline jobs on CPU or any other signal. |
 | Scaling | Run several replicas. The server spreads jobs over registered workers that report themselves available. Scale on `WorkerStats.Load` (exported through `OnStats`). |

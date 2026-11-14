@@ -1,4 +1,4 @@
-.PHONY: all fmt fmt-check vet test race integration e2e build docker deps-macos deps-debian
+.PHONY: all fmt fmt-check vet test race integration e2e build docker deps-macos deps-debian deps-onnxruntime
 
 all: fmt-check vet race
 
@@ -40,3 +40,8 @@ deps-macos:
 
 deps-debian:
 	sudo apt-get install -y pkg-config libopus-dev libopusfile-dev libsoxr-dev
+
+# ONNX Runtime shared library for the Silero VAD (vad/silero). Without it the
+# Silero tests are skipped and the examples fall back to the energy detector.
+deps-onnxruntime:
+	sudo ./scripts/install-onnxruntime.sh /usr/local/lib

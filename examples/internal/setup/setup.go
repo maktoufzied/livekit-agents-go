@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	agents "github.com/maktoufzied/livekit-agents-go"
@@ -16,6 +17,8 @@ import (
 	"github.com/maktoufzied/livekit-agents-go/providers/openai"
 	"github.com/maktoufzied/livekit-agents-go/stt"
 	"github.com/maktoufzied/livekit-agents-go/tts"
+	"github.com/maktoufzied/livekit-agents-go/vad"
+	"github.com/maktoufzied/livekit-agents-go/vad/silero"
 )
 
 // Logger returns a structured logger that redacts credential-like fields.
@@ -64,4 +67,50 @@ func Providers() (stt.STT, llm.LLM, tts.TTS, error) {
 		return nil, nil, nil, fmt.Errorf("llm: %w", err)
 	}
 	return recognizer, model, voice, nil
+}
+
+var (
+	vadOnce   sync.Once
+	sharedVAD vad.VAD
+	vadErr    error
+)
+
+// VAD returns the voice activity detector shared by every session of the
+// process. The VAD environment variable selects it:
+//
+//   - silero: the Silero model. Needs the ONNX Runtime library, see
+//     scripts/install-onnxruntime.sh.
+//   - energy: the dependency-free energy detector.
+//   - unset: Silero when ONNX Runtime is installed, the energy detector
+//     otherwise. With AGENT_FAKE_PROVIDERS=1 always the energy detector,
+//     because the fake recognizer reacts to any sound, not only to speech.
+//
+// The model is loaded once: call VAD from the entrypoint of each job.
+func VAD(logger *slog.Logger) (vad.VAD, error) {
+	vadOnce.Do(func() {
+		choice := os.Getenv("VAD")
+		if choice == "" && os.Getenv("AGENT_FAKE_PROVIDERS") == "1" {
+			choice = "energy"
+		}
+		switch choice {
+		case "energy":
+			sharedVAD = vad.NewEnergy(vad.EnergyOptions{})
+		case "silero":
+			sharedVAD, vadErr = silero.New(silero.Options{})
+		case "":
+			detector, err := silero.New(silero.Options{})
+			if err != nil {
+				logger.Warn("Silero VAD unavailable, using the energy detector", "error", err)
+				sharedVAD = vad.NewEnergy(vad.EnergyOptions{})
+				return
+			}
+			sharedVAD = detector
+		default:
+			vadErr = fmt.Errorf("VAD=%q: want silero or energy", choice)
+		}
+		if vadErr == nil {
+			logger.Info("voice activity detector", "vad", fmt.Sprintf("%T", sharedVAD))
+		}
+	})
+	return sharedVAD, vadErr
 }

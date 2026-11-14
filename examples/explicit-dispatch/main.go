@@ -19,7 +19,6 @@ import (
 	agents "github.com/maktoufzied/livekit-agents-go"
 	"github.com/maktoufzied/livekit-agents-go/examples/internal/setup"
 	"github.com/maktoufzied/livekit-agents-go/roomio"
-	"github.com/maktoufzied/livekit-agents-go/vad"
 )
 
 // AgentName must match the name used when creating the dispatch.
@@ -46,13 +45,17 @@ func entrypoint(ctx context.Context, job *agents.Job) error {
 	if err != nil {
 		return err
 	}
+	detector, err := setup.VAD(job.Logger())
+	if err != nil {
+		return err
+	}
 	session, err := agents.NewSession(agents.SessionOptions{
 		Agent: &agents.Agent{
 			Instructions: "You are a support agent on a phone-like call with a customer named " + meta.Customer +
 				". Be concise and helpful; your answers are spoken aloud.",
 		},
 		STT: recognizer, LLM: model, TTS: voice,
-		VAD:    vad.NewEnergy(vad.EnergyOptions{}),
+		VAD:    detector,
 		Logger: job.Logger(),
 	})
 	if err != nil {
@@ -68,6 +71,12 @@ func entrypoint(ctx context.Context, job *agents.Job) error {
 func main() {
 	logger := setup.Logger()
 	slog.SetDefault(logger)
+
+	// Load the voice activity model before the first job needs it.
+	if _, err := setup.VAD(logger); err != nil {
+		logger.Error("cannot load the voice activity detector", "error", err)
+		os.Exit(1)
+	}
 	worker, err := agents.NewWorker(agents.WorkerOptions{
 		AgentName:         AgentName,
 		Entrypoint:        entrypoint,

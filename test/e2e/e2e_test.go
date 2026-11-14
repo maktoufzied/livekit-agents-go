@@ -29,7 +29,26 @@ import (
 	"github.com/maktoufzied/livekit-agents-go/providers/deepgram"
 	"github.com/maktoufzied/livekit-agents-go/providers/openai"
 	"github.com/maktoufzied/livekit-agents-go/vad"
+	"github.com/maktoufzied/livekit-agents-go/vad/silero"
 )
+
+// detector returns the Silero VAD when ONNX Runtime is installed, so that the
+// pipeline runs with the model on real speech, and the energy detector
+// otherwise.
+func detector(t *testing.T) vad.VAD {
+	t.Helper()
+	v, err := silero.New(silero.Options{})
+	if errors.Is(err, silero.ErrRuntimeUnavailable) {
+		t.Logf("VAD: energy (%v)", err)
+		return vad.NewEnergy(vad.EnergyOptions{})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { v.Close() })
+	t.Log("VAD: silero")
+	return v
+}
 
 func TestRealProvidersPipeline(t *testing.T) {
 	if os.Getenv("DEEPGRAM_API_KEY") == "" {
@@ -88,7 +107,7 @@ func TestRealProvidersPipeline(t *testing.T) {
 	session, err := agents.NewSession(agents.SessionOptions{
 		Agent: &agents.Agent{Instructions: "You are a concise voice assistant. Answer in one short sentence."},
 		STT:   recognizer, LLM: model, TTS: voice,
-		VAD: vad.NewEnergy(vad.EnergyOptions{}),
+		VAD: detector(t),
 	})
 	if err != nil {
 		t.Fatal(err)

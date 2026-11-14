@@ -16,6 +16,8 @@ permissions:
 
 env:
   NATIVE_DEPS: pkg-config libopus-dev libopusfile-dev libsoxr-dev
+  # The Silero VAD tests fail instead of skipping when ONNX Runtime is missing.
+  SILERO_REQUIRED: "1"
 
 jobs:
   test:
@@ -27,6 +29,8 @@ jobs:
           go-version-file: go.mod
       - name: Native audio libraries
         run: sudo apt-get update && sudo apt-get install -y $NATIVE_DEPS
+      - name: ONNX Runtime (Silero VAD)
+        run: sudo scripts/install-onnxruntime.sh /usr/local/lib
       - name: Format
         run: |
           out="$(gofmt -l .)"
@@ -57,6 +61,8 @@ jobs:
           go-version-file: go.mod
       - name: Native audio libraries
         run: sudo apt-get update && sudo apt-get install -y $NATIVE_DEPS
+      - name: ONNX Runtime (Silero VAD)
+        run: sudo scripts/install-onnxruntime.sh /usr/local/lib
       - name: Start LiveKit server
         run: |
           docker run -d --name livekit --network host livekit/livekit-server --dev --node-ip 127.0.0.1
@@ -89,6 +95,8 @@ jobs:
           go-version-file: go.mod
       - name: Native audio libraries
         run: sudo apt-get update && sudo apt-get install -y $NATIVE_DEPS
+      - name: ONNX Runtime (Silero VAD)
+        run: sudo scripts/install-onnxruntime.sh /usr/local/lib
       - name: End-to-end tests (real providers)
         env:
           DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}

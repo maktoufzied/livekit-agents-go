@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 #
 # Builds one example agent. The room audio path uses cgo (libopus, libsoxr),
-# so both stages need the native libraries.
+# so both stages need the native libraries. The Silero VAD loads ONNX Runtime
+# at startup; it is downloaded in the build stage and copied over.
 #
 #   docker build -t livekit-agents-go-example .
 #   docker build --build-arg EXAMPLE=voice-assistant -t livekit-agents-go-voice .
@@ -21,6 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libopus-dev libopusfile-dev libsoxr-dev \
     && apt-get clean
 WORKDIR /src
+COPY scripts/install-onnxruntime.sh scripts/
+RUN scripts/install-onnxruntime.sh /out/lib
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
@@ -32,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates libopus0 libopusfile0 libsoxr0 \
     && apt-get clean \
     && useradd --system --uid 10001 --no-create-home agent
+COPY --from=build /out/lib/ /usr/local/lib/
 COPY --from=build /out/agent /usr/local/bin/agent
 WORKDIR /app
 USER agent

@@ -20,7 +20,6 @@ import (
 	"github.com/maktoufzied/livekit-agents-go/examples/internal/setup"
 	"github.com/maktoufzied/livekit-agents-go/llm"
 	"github.com/maktoufzied/livekit-agents-go/roomio"
-	"github.com/maktoufzied/livekit-agents-go/vad"
 )
 
 // The JSON Schema sent to the model is derived from these structs. Fields
@@ -86,6 +85,10 @@ func entrypoint(ctx context.Context, job *agents.Job) error {
 	if err != nil {
 		return err
 	}
+	detector, err := setup.VAD(job.Logger())
+	if err != nil {
+		return err
+	}
 	session, err := agents.NewSession(agents.SessionOptions{
 		Agent: &agents.Agent{
 			Instructions: "You are the voice assistant of a restaurant. You can check the weather for the terrace " +
@@ -93,7 +96,7 @@ func entrypoint(ctx context.Context, job *agents.Job) error {
 			Tools: tools(),
 		},
 		STT: recognizer, LLM: model, TTS: voice,
-		VAD:    vad.NewEnergy(vad.EnergyOptions{}),
+		VAD:    detector,
 		Tools:  agents.ToolOptions{MaxSteps: 4},
 		Logger: job.Logger(),
 	})
@@ -118,6 +121,12 @@ func entrypoint(ctx context.Context, job *agents.Job) error {
 func main() {
 	logger := setup.Logger()
 	slog.SetDefault(logger)
+
+	// Load the voice activity model before the first job needs it.
+	if _, err := setup.VAD(logger); err != nil {
+		logger.Error("cannot load the voice activity detector", "error", err)
+		os.Exit(1)
+	}
 	worker, err := agents.NewWorker(agents.WorkerOptions{Entrypoint: entrypoint, Logger: logger})
 	if err != nil {
 		logger.Error("cannot create worker", "error", err)

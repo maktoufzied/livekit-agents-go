@@ -16,11 +16,14 @@ import (
 	agents "github.com/maktoufzied/livekit-agents-go"
 	"github.com/maktoufzied/livekit-agents-go/examples/internal/setup"
 	"github.com/maktoufzied/livekit-agents-go/roomio"
-	"github.com/maktoufzied/livekit-agents-go/vad"
 )
 
 func entrypoint(ctx context.Context, job *agents.Job) error {
 	recognizer, model, voice, err := setup.Providers()
+	if err != nil {
+		return err
+	}
+	detector, err := setup.VAD(job.Logger())
 	if err != nil {
 		return err
 	}
@@ -32,7 +35,7 @@ func entrypoint(ctx context.Context, job *agents.Job) error {
 		STT:    recognizer,
 		LLM:    model,
 		TTS:    voice,
-		VAD:    vad.NewEnergy(vad.EnergyOptions{}),
+		VAD:    detector,
 		Logger: job.Logger(),
 	})
 	if err != nil {
@@ -60,6 +63,12 @@ func entrypoint(ctx context.Context, job *agents.Job) error {
 func main() {
 	logger := setup.Logger()
 	slog.SetDefault(logger)
+
+	// Load the voice activity model before the first job needs it.
+	if _, err := setup.VAD(logger); err != nil {
+		logger.Error("cannot load the voice activity detector", "error", err)
+		os.Exit(1)
+	}
 
 	// URL and credentials come from LIVEKIT_URL, LIVEKIT_API_KEY and
 	// LIVEKIT_API_SECRET. No AgentName: the server dispatches this worker

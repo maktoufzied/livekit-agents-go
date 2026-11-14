@@ -22,6 +22,8 @@ want to extend it, add a provider, or judge whether it fits their use.
 Dependency rules:
 
 - `stt`, `llm`, `tts`, `vad`, `audio` depend on nothing but the standard library.
+- `vad/silero` is the one model-backed detector. It uses cgo to call ONNX Runtime and
+  loads that library when `silero.New` runs, so nothing else pays for it.
 - Providers depend on those interface packages and on `providers` (errors, `Secret`).
   They never import the root package.
 - The root package depends on the interfaces and on the pure-Go part of the official
@@ -257,4 +259,5 @@ the messages. Two findings are worth keeping for later:
   path is plausible. The encoder's quality was not evaluated, so `roomio` stays on the
   upstream helpers for now.
 - Pure-Go Silero VAD ports exist (for example `zserge/govad`, MIT). They were not
-  evaluated; `vad.VAD` is the place to plug one in.
+  evaluated. `vad/silero` runs the official model on ONNX Runtime instead, the same
+  model file and runtime as the upstream Python plugin.

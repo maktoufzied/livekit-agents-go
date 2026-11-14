@@ -101,6 +101,7 @@ This exact program is [`examples/quickstart`](examples/quickstart). More:
 |---|---|---|
 | `agents` (root) | `Worker`, `Job`, `Session`, `Agent`, events, metrics, errors | no |
 | `llm`, `stt`, `tts`, `vad` | Provider interfaces, conversation, tools, energy VAD | no |
+| `vad/silero` | Silero VAD model on ONNX Runtime | **yes**, library loaded at run time |
 | `audio` | PCM frame type and helpers | no |
 | `roomio` | LiveKit room audio in/out, agent state and transcripts | **yes** |
 | `providers/deepgram` | Streaming STT (WebSocket), TTS (REST) | no |
@@ -125,6 +126,27 @@ Design details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | Debian / Ubuntu | `apt-get install pkg-config libopus-dev libopusfile-dev libsoxr-dev` |
 
 The core packages and the providers build with `CGO_ENABLED=0`.
+
+### Voice activity detection
+
+| Detector | Package | Needs | Use it when |
+|---|---|---|---|
+| Silero model | `vad/silero` | cgo, and the ONNX Runtime library at run time | Production: it ignores noise, music and keyboard sounds |
+| Energy | `vad` | Nothing | Tests, quiet rooms, or builds without cgo |
+
+```go
+detector, err := silero.New(silero.Options{}) // once per process
+if err != nil {
+	return err // errors.Is(err, silero.ErrRuntimeUnavailable): library missing
+}
+session, err := agents.NewSession(agents.SessionOptions{VAD: detector /* ... */})
+```
+
+ONNX Runtime is not needed to build. Install the pinned version with
+`make deps-onnxruntime` (or `scripts/install-onnxruntime.sh <dir>`), or point
+`ONNXRUNTIME_LIB` at an existing library. The examples use Silero when the library is
+found and fall back to the energy detector with a warning; `VAD=silero` or `VAD=energy`
+forces one. On an Apple M4 the model takes about 0.06 ms per 20 ms frame.
 
 ## Run an example
 
@@ -181,7 +203,7 @@ the server dispatches it to every new room.
 |---|---|
 | Worker | Registration, job requests, accept/reject, assignment, capacity and load reporting, reconnection with running-job report, graceful drain, job termination, panic isolation, HTTP health endpoint, hosted mode for LiveKit Cloud |
 | Audio | Subscribe to a participant, publish agent audio, Opus decode/encode and resampling (upstream helpers), paced playout with a bounded queue |
-| Turns | Energy VAD, endpointing delays, STT-driven turns, manual turns, pluggable end-of-turn model interface |
+| Turns | Silero VAD (model) and energy VAD, endpointing delays, STT-driven turns, manual turns, pluggable end-of-turn model interface |
 | Interruptions | Cancels LLM, TTS and tools, drops queued audio, records only what was played, no stale audio in the next turn |
 | Conversation | Role-based history, instructions, streaming replies, `Say`, `GenerateReply` |
 | Tools | Typed tools with generated JSON Schema, argument validation, timeouts, concurrent or sequential execution, model-visible errors, never retried |
@@ -225,7 +247,8 @@ integration tests and the Docker build. The end-to-end job is manual.
 | Deepgram, Anthropic and OpenAI providers | Verified against the live APIs on 2026-11-13 with the opt-in `e2e` tests: streaming STT, both LLMs with a tool round trip, both TTS, and the full STT → LLM → TTS pipeline (Deepgram + Anthropic) |
 | LiveKit Cloud connectivity | Verified on 2026-11-13: the explicit-dispatch vertical slice (fake speech providers) passed against a Cloud project, server 1.13.10. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | LiveKit Cloud managed agent deployment | Implemented (hosted-mode worker, health endpoint, `cmd/lkagent`), tested locally. **Not yet run on LiveKit Cloud**, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| Linux arm64 (Docker) | Image builds and the example worker registers with `livekit-server`. Tests were run on macOS arm64 only; the Linux amd64 CI workflow has not executed yet |
+| Linux arm64 (Docker) | Image builds and the example worker registers with `livekit-server`. The image loads the Silero model at startup |
+| Linux amd64 (GitHub Actions, Ubuntu 26.04) | Unit tests with `-race`, including the Silero VAD, and integration tests on every push |
 
 ## Limitations and follow-up work
 
@@ -234,7 +257,6 @@ Not implemented in this version:
 - Speech-to-speech realtime models (the `realtime` interfaces exist, nothing uses them).
 - Video and vision input, avatars.
 - Model-based turn prediction (the `TurnDetector` interface exists, no model ships).
-- Model-based VAD such as Silero (the `vad.VAD` interface accepts one).
 - Agent handoffs, multi-agent workflows, task groups.
 - Telephony helpers (SIP, DTMF, voicemail detection), background audio.
 - False-interruption recovery (resuming a reply after a noise).

@@ -8,6 +8,7 @@ require (
 	github.com/livekit/protocol v1.51.1-0.20260910121219-271d9cde3897
 	github.com/livekit/server-sdk-go/v2 v2.19.0
 	github.com/pion/webrtc/v4 v4.2.19
+	github.com/yalue/onnxruntime_go v1.38.0
 	google.golang.org/protobuf v1.36.12
 )
 
