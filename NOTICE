@@ -1,0 +1,32 @@
+livekit-agents-go
+Copyright 2026 The livekit-agents-go authors
+
+This is a community project. It is not an official LiveKit SDK and is not
+affiliated with or endorsed by LiveKit, Inc.
+
+This product is designed after the LiveKit Agents frameworks:
+
+  - livekit/agents (Python), Copyright LiveKit, Inc., Apache License 2.0
+    https://github.com/livekit/agents
+  - livekit/agents-js (TypeScript), Copyright LiveKit, Inc., Apache License 2.0
+    https://github.com/livekit/agents-js
+
+No source code from those projects is included. The worker protocol flow,
+default values (for example endpointing and interruption delays, the job
+assignment timeout, the reconnection schedule) and wire-level names
+(participant attributes such as "lk.agent.state" and "lk.agent.name", the
+"lk.transcription" topic) follow their behaviour so that agents built with
+this SDK interoperate with LiveKit servers and clients.
+
+This product depends on, and links against, the following LiveKit modules,
+each licensed under the Apache License 2.0, Copyright LiveKit, Inc.:
+
+  - github.com/livekit/server-sdk-go
+  - github.com/livekit/protocol
+  - github.com/livekit/media-sdk
+
+Other notable dependencies: github.com/pion/webrtc (MIT),
+github.com/gorilla/websocket (BSD-2-Clause), google.golang.org/protobuf
+(BSD-3-Clause), gopkg.in/hraban/opus.v2 (MIT). The room audio path links
+against the native libraries libopus and libopusfile (BSD-3-Clause) and
+libsoxr (LGPL-2.1-or-later, dynamically linked).

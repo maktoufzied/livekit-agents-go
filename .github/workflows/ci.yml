@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      e2e:
+        description: Run the end-to-end tests with real provider credentials
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  NATIVE_DEPS: pkg-config libopus-dev libopusfile-dev libsoxr-dev
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Native audio libraries
+        run: sudo apt-get update && sudo apt-get install -y $NATIVE_DEPS
+      - name: Format
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
+      - name: Modules are tidy
+        run: go mod tidy && git diff --exit-code go.mod go.sum
+      - name: Vet
+        run: |
+          go vet ./...
+          go vet -tags "integration e2e" ./test/... ./providers/...
+      - name: Test
+        run: go test -count=1 ./...
+      - name: Race
+        run: go test -race -count=1 ./...
+      - name: Deploy command (separate module)
+        run: |
+          go -C cmd/lkagent vet ./...
+          go -C cmd/lkagent test -race -count=1 ./...
+      - name: Build examples
+        run: go build -o /dev/null ./examples/...
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Native audio libraries
+        run: sudo apt-get update && sudo apt-get install -y $NATIVE_DEPS
+      - name: Start LiveKit server
+        run: |
+          docker run -d --name livekit --network host livekit/livekit-server --dev --node-ip 127.0.0.1
+          for i in $(seq 1 50); do
+            if curl -fsS -o /dev/null http://localhost:7880; then exit 0; fi
+            sleep 0.2
+          done
+          docker logs livekit
+          exit 1
+      - name: Integration tests
+        run: go test -tags integration -race -count=1 -v ./test/integration/
+      - name: Server logs
+        if: failure()
+        run: docker logs livekit
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t livekit-agents-go-example .
+
+  e2e:
+    if: github.event_name == 'workflow_dispatch' && inputs.e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Native audio libraries
+        run: sudo apt-get update && sudo apt-get install -y $NATIVE_DEPS
+      - name: End-to-end tests (real providers)
+        env:
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: go test -tags e2e -count=1 -v ./test/e2e/ ./providers/...
