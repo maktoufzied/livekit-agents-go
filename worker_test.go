@@ -456,10 +456,12 @@ func TestWorkerDrain(t *testing.T) {
 	if cancelledEarly.Load() {
 		t.Fatal("job was cancelled instead of drained")
 	}
-	u := f.jobUpdates()
-	if u[len(u)-1].Status != livekit.JobStatus_JS_SUCCESS {
-		t.Fatalf("final status not delivered: %+v", u)
-	}
+	// Run returns once the status is written; the server may still be
+	// reading it.
+	waitFor(t, "final job status delivered", func() bool {
+		u := f.jobUpdates()
+		return len(u) > 0 && u[len(u)-1].Status == livekit.JobStatus_JS_SUCCESS
+	})
 }
 
 func TestWorkerDrainTimeoutCancelsJobs(t *testing.T) {
