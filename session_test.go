@@ -64,6 +64,7 @@ func newHarness(t *testing.T, responses []agentstest.Response, opts ...hopt) *ha
 			MinEndpointingDelay:     20 * time.Millisecond,
 			MaxEndpointingDelay:     150 * time.Millisecond,
 			MinInterruptionDuration: 60 * time.Millisecond,
+			EchoWarmup:              -1, // the tests interrupt the agent's first words
 		},
 		Retry: agents.RetryOptions{Backoff: time.Millisecond},
 	}
@@ -219,7 +220,13 @@ func testInterruption(t *testing.T, falseInterruptionTimeout time.Duration, word
 		if n := len(eventsOf[agents.SpeechFinished](h)); n != 0 {
 			t.Fatalf("the sound alone finished %d speeches", n)
 		}
+		// Interim results do not decide; the final transcript does.
 		h.stt.Interim("actually")
+		time.Sleep(30 * time.Millisecond)
+		if n := len(eventsOf[agents.SpeechFinished](h)); n != 0 {
+			t.Fatalf("an interim transcript finished %d speeches", n)
+		}
+		h.stt.Final("actually something else")
 	}
 	first := h.waitSpeeches(1)[0]
 	if !first.Interrupted || first.Err != nil {
@@ -258,7 +265,9 @@ func testInterruption(t *testing.T, falseInterruptionTimeout time.Duration, word
 	// Next turn: only audio of the new reply may be played.
 	staleMarkers := int16(len(h.tts.Texts()))
 	h.in.PushSilence(200 * time.Millisecond)
-	h.userSays("actually something else")
+	if !words {
+		h.userSays("actually something else")
+	}
 	second := h.waitSpeeches(2)[1]
 	if second.Interrupted || second.Err != nil {
 		t.Fatalf("second speech: %+v", second)
@@ -278,7 +287,7 @@ func testInterruption(t *testing.T, falseInterruptionTimeout time.Duration, word
 // then resumes where it stopped: nothing is lost and nothing is said twice.
 func TestFalseInterruptionResumesTheSpeech(t *testing.T) {
 	h := newHarness(t, []agentstest.Response{agentstest.Text(longReply)}, withVAD(), withOpts(func(o *agents.SessionOptions) {
-		o.Turn.FalseInterruptionTimeout = 150 * time.Millisecond
+		o.Turn.FalseInterruptionTimeout = 400 * time.Millisecond
 	})).start()
 	h.userSays("tell me a story")
 	waitFor(t, "agent speaking", func() bool { return h.s.AgentState() == agents.AgentSpeaking })
@@ -303,7 +312,7 @@ func TestFalseInterruptionResumesTheSpeech(t *testing.T) {
 		t.Fatalf("speech: %+v", fin)
 	}
 	fi := eventsOf[agents.FalseInterruption](h)
-	if len(fi) != 1 || fi[0].SpeechID != fin.SpeechID || fi[0].Paused < 150*time.Millisecond {
+	if len(fi) != 1 || fi[0].SpeechID != fin.SpeechID || fi[0].Paused < 400*time.Millisecond {
 		t.Fatalf("false interruption events: %+v", fi)
 	}
 
@@ -332,6 +341,95 @@ func TestFalseInterruptionResumesTheSpeech(t *testing.T) {
 	}
 	if len(metricsOf[agents.InterruptionMetrics](h)) != 0 {
 		t.Fatal("a false interruption was counted as an interruption")
+	}
+}
+
+// A sound made while the reply is still being prepared holds its audio
+// back until the sound is over, then lets it play at once.
+func TestSoundBeforeTheReplyIsAudibleDelaysIt(t *testing.T) {
+	h := newHarness(t, []agentstest.Response{agentstest.Text("Short answer.")}, withVAD(), withOpts(func(o *agents.SessionOptions) {
+		o.Turn.FalseInterruptionTimeout = 30 * time.Second
+		o.Turn.MinInterruptionDuration = 10 * time.Second // the sound is too short to interrupt
+	}))
+	h.tts.FirstFrameDelay = 150 * time.Millisecond
+	h.start()
+	h.userSays("question")
+	waitFor(t, "agent thinking", func() bool { return h.s.AgentState() == agents.AgentThinking })
+
+	h.in.PushTone(100 * time.Millisecond)
+	waitFor(t, "sound heard", func() bool { return h.s.UserState() == agents.UserSpeaking })
+	time.Sleep(250 * time.Millisecond) // the audio is ready by now
+	if n := len(h.out.Frames()); n != 0 {
+		t.Fatalf("%d frames played while the user was making a sound", n)
+	}
+	h.in.PushSilence(200 * time.Millisecond)
+	fin := h.waitSpeeches(1)[0]
+	if fin.Interrupted || fin.Err != nil {
+		t.Fatalf("speech: %+v", fin)
+	}
+	if n := len(eventsOf[agents.FalseInterruption](h)); n != 1 {
+		t.Fatalf("%d false interruption events", n)
+	}
+}
+
+// A final transcript interrupts the agent even when the VAD heard nothing.
+func TestFinalTranscriptInterruptsWithoutTheVAD(t *testing.T) {
+	h := newHarness(t, []agentstest.Response{agentstest.Text(longReply), agentstest.Text("Yes?")}, withVAD()).start()
+	h.userSays("tell me a story")
+	waitFor(t, "agent speaking", func() bool { return h.s.AgentState() == agents.AgentSpeaking })
+	h.stt.Final("wait")
+	fins := h.waitSpeeches(2)
+	if !fins[0].Interrupted || fins[1].Interrupted {
+		t.Fatalf("speeches: %+v", fins)
+	}
+}
+
+// At the start of the session the microphone may return the agent's own
+// voice. During the warm-up, sound neither interrupts the agent nor reaches
+// the recognizer; afterwards it does.
+func TestEchoWarmup(t *testing.T) {
+	h := newHarness(t, []agentstest.Response{agentstest.Text(longReply)}, withVAD(), withOpts(func(o *agents.SessionOptions) {
+		o.Turn.EchoWarmup = 250 * time.Millisecond
+		o.Turn.FalseInterruptionTimeout = 30 * time.Second
+	})).start()
+	h.userSays("tell me a story")
+	waitFor(t, "agent speaking", func() bool { return h.s.AgentState() == agents.AgentSpeaking })
+	started := time.Now()
+
+	h.in.PushTone(100 * time.Millisecond) // "echo"
+	waitFor(t, "sound heard", func() bool { return h.s.UserState() == agents.UserSpeaking })
+	h.in.PushSilence(150 * time.Millisecond)
+	waitFor(t, "sound over", func() bool { return h.s.UserState() == agents.UserListening })
+	if el := time.Since(started); el > 200*time.Millisecond {
+		t.Skipf("too slow to test the warm-up: %v", el)
+	}
+	if h.s.AgentState() != agents.AgentSpeaking {
+		t.Fatal("sound interrupted the agent during the warm-up")
+	}
+	if n := h.stt.LoudFrames(); n != 0 {
+		t.Fatalf("%d frames of sound reached the recognizer during the warm-up", n)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	h.in.PushTone(200 * time.Millisecond)
+	waitFor(t, "speech on hold", func() bool { return h.s.AgentState() == agents.AgentListening })
+	waitFor(t, "sound at the recognizer", func() bool { return h.stt.LoudFrames() > 0 })
+}
+
+// A sound that starts during the warm-up and is still going on when it ends
+// interrupts then.
+func TestSoundOutlastingTheEchoWarmupInterrupts(t *testing.T) {
+	h := newHarness(t, []agentstest.Response{agentstest.Text(longReply)}, withVAD(), withOpts(func(o *agents.SessionOptions) {
+		o.Turn.EchoWarmup = 200 * time.Millisecond
+		o.Turn.FalseInterruptionTimeout = 30 * time.Second
+	})).start()
+	h.userSays("tell me a story")
+	waitFor(t, "agent speaking", func() bool { return h.s.AgentState() == agents.AgentSpeaking })
+	started := time.Now()
+	h.in.PushTone(300 * time.Millisecond) // never followed by silence: it goes on
+	waitFor(t, "speech on hold", func() bool { return h.s.AgentState() == agents.AgentListening })
+	if el := time.Since(started); el < 150*time.Millisecond {
+		t.Fatalf("on hold %v after the agent started, inside the warm-up", el)
 	}
 }
 
@@ -411,6 +509,7 @@ func TestVADEndpointingAndTurnDetector(t *testing.T) {
 	})
 	h := newHarness(t, []agentstest.Response{agentstest.Text("Done.")}, withVAD(), withOpts(func(o *agents.SessionOptions) {
 		o.TurnDetector = det
+		o.Turn.MaxEndpointingDelay = 400 * time.Millisecond
 	})).start()
 
 	h.in.PushTone(200 * time.Millisecond)
@@ -426,8 +525,9 @@ func TestVADEndpointingAndTurnDetector(t *testing.T) {
 	if asked.Load() != 1 {
 		t.Fatalf("turn detector asked %d times", asked.Load())
 	}
-	// The low probability must have postponed the turn to MaxEndpointingDelay.
-	if el := time.Since(start); el < 120*time.Millisecond {
+	// The low probability must have postponed the turn to MaxEndpointingDelay
+	// after the end of the speech, which the VAD reported 100 ms late.
+	if el := time.Since(start); el < 250*time.Millisecond {
 		t.Fatalf("turn committed after %v, expected the max endpointing delay", el)
 	}
 	if len(metricsOf[agents.EndOfTurnMetrics](h)) != 1 || len(metricsOf[agents.TranscriptionMetrics](h)) != 1 {

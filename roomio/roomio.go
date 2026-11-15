@@ -405,7 +405,21 @@ type input struct {
 	once    sync.Once
 	closed  chan struct{}
 	dropped atomic.Int64
+
+	// Owned by the reader. started is when the first frame was read and
+	// emitted the audio returned since: together they tell whether the
+	// audio keeps up with real time.
+	started time.Time
+	emitted time.Duration
 }
+
+const (
+	// inputGap is how far the received audio may fall behind real time
+	// before silence is inserted. It absorbs network jitter.
+	inputGap = 100 * time.Millisecond
+	// inputFill is the length of an inserted silence frame.
+	inputFill = 20 * time.Millisecond
+)
 
 func newInput(format audio.Format, size int) *input {
 	return &input{format: format, ch: make(chan audio.Frame, size), closed: make(chan struct{})}
@@ -443,9 +457,30 @@ func (in *input) Close() error { return nil }
 
 func (in *input) shutdown() { in.once.Do(func() { close(in.closed) }) }
 
+// ReadFrame returns the next frame of the participant's audio, or a frame of
+// silence when none arrived in time.
+//
+// Browsers stop sending audio packets while the user is silent (Opus DTX),
+// and the decoder does not fill the holes. Without the inserted silence the
+// audio would run slower than real time: a voice activity detector waiting
+// for half a second of silence would get it seconds later.
 func (in *input) ReadFrame(ctx context.Context) (audio.Frame, error) {
+	var late <-chan time.Time
+	if !in.started.IsZero() {
+		t := time.NewTimer(time.Until(in.started.Add(in.emitted + inputGap)))
+		defer t.Stop()
+		late = t.C
+	}
 	select {
 	case f := <-in.ch:
+		if in.started.IsZero() {
+			in.started = time.Now()
+		}
+		in.emitted += f.Duration()
+		return f, nil
+	case <-late:
+		f := audio.Silence(in.format, inputFill)
+		in.emitted += f.Duration()
 		return f, nil
 	case <-in.closed:
 		return audio.Frame{}, io.EOF

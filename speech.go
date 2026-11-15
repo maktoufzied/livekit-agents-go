@@ -29,6 +29,9 @@ type SpeechHandle struct {
 	// The speech goroutine takes it for the first model step or discards it.
 	preempt   *preemptive
 	preemptAt time.Time
+	// userStoppedAt is when the user stopped speaking, for a reply to a
+	// spoken turn; zero otherwise.
+	userStoppedAt time.Time
 
 	interrupted   atomic.Bool
 	interruptOnce sync.Once

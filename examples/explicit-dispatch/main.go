@@ -66,6 +66,7 @@ func entrypoint(ctx context.Context, job *agents.Job) error {
 	if err != nil {
 		return err
 	}
+	setup.LogMetrics(session, job.Logger())
 	return roomio.Run(ctx, job, session, roomio.Options{
 		OnParticipant: func(_ context.Context, s *agents.Session, _ string) {
 			_, _ = s.Say("Hello "+meta.Customer+", thanks for calling support. What can I do for you?", agents.SayOptions{})

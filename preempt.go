@@ -14,6 +14,10 @@ import (
 // one user turn. Each time the user goes on, the request is thrown away.
 const maxPreemptiveAttempts = 3
 
+// maxPreemptiveSpeech is the length of user speech beyond which no request
+// is sent ahead: a long utterance is more likely to go on.
+const maxPreemptiveSpeech = 10 * time.Second
+
 // preemptive is a model request started before the user turn is committed,
 // while the endpointing delay runs. It is used for the reply only if, when
 // the reply starts, the request to send is exactly this one.
@@ -179,6 +183,9 @@ func (s *Session) preempt() {
 	busy := len(s.speeches) > 0
 	s.mu.Unlock()
 	if busy || t.preemptCount >= maxPreemptiveAttempts {
+		return
+	}
+	if !t.speechStartedAt.IsZero() && time.Since(t.speechStartedAt) > maxPreemptiveSpeech {
 		return
 	}
 	t.preemptCount++

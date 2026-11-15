@@ -161,3 +161,13 @@ func TurnDetector(logger *slog.Logger) (agents.TurnDetector, error) {
 	})
 	return sharedTurn, turnErr
 }
+
+// LogMetrics logs every latency and usage measurement of the session at
+// debug level (LOG_LEVEL=debug), to see where the time of a reply goes.
+func LogMetrics(session *agents.Session, logger *slog.Logger) {
+	session.On(func(ev agents.Event) {
+		if m, ok := ev.(agents.MetricsCollected); ok {
+			logger.Debug("metric", "kind", fmt.Sprintf("%T", m.Metric), "value", fmt.Sprintf("%+v", m.Metric))
+		}
+	})
+}

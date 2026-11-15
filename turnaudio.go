@@ -11,6 +11,9 @@ const (
 	// turnAudioWindow is how much of the user's turn is kept for the
 	// TurnDetector.
 	turnAudioWindow = 8 * time.Second
+	// turnAudioSlack is kept on top of the window, so that a whole window
+	// is still there when the end of the speech is reported, late.
+	turnAudioSlack = time.Second
 	// turnAudioLead is kept before the detected start of speech, so that
 	// the first syllable is not cut.
 	turnAudioLead = 200 * time.Millisecond
@@ -43,7 +46,7 @@ func (b *turnAudio) write(f audio.Frame) {
 	defer b.mu.Unlock()
 	if f.Format() != b.format {
 		b.format = f.Format()
-		b.ring = make([]int16, b.samples(turnAudioWindow))
+		b.ring = make([]int16, b.samples(turnAudioWindow+turnAudioSlack))
 		b.total, b.start, b.end = 0, -1, -1
 	}
 	data := f.Data
@@ -120,7 +123,7 @@ func (b *turnAudio) snapshot() audio.Frame {
 	if b.end >= 0 {
 		end = max(oldest, min(end, b.end))
 	}
-	start := max(oldest, end-int64(len(b.ring)))
+	start := max(oldest, end-b.samples(turnAudioWindow))
 	if b.start >= 0 {
 		start = min(max(start, b.start), end)
 	}

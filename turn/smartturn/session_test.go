@@ -120,10 +120,12 @@ func TestSessionWaitsForUnfinishedSentence(t *testing.T) {
 	unfinished := replyDelay("unfinished_16k", "I can't seem to, um...")
 	finished := replyDelay("finished_16k", "I can't seem to, um, find the return label.")
 	t.Logf("reply after an unfinished sentence: %v, after a finished one: %v", unfinished.Round(time.Millisecond), finished.Round(time.Millisecond))
-	if unfinished < maxDelay-minDelay {
-		t.Errorf("unfinished sentence: reply after %v, want the maximum endpointing delay (%v)", unfinished, maxDelay)
+	// The delays count from the end of the speech, which the VAD reports
+	// about 0.6 s late; the transcript is sent at that moment.
+	if unfinished < maxDelay-800*time.Millisecond {
+		t.Errorf("unfinished sentence: reply after %v, want the maximum endpointing delay (%v after the speech)", unfinished, maxDelay)
 	}
-	if finished > maxDelay-minDelay-200*time.Millisecond {
-		t.Errorf("finished sentence: reply after %v, want about the minimum endpointing delay (%v)", finished, minDelay)
+	if finished > 700*time.Millisecond {
+		t.Errorf("finished sentence: reply after %v, want it at once", finished)
 	}
 }

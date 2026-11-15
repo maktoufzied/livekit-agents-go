@@ -203,6 +203,7 @@ func (s *Session) runLLMStep(sp *SpeechHandle, p *pipeline, step int, choice llm
 		if ahead, aheadErr, aheadOK = pre.take(ctx, req); aheadOK {
 			aheadBy = time.Since(sp.preemptAt)
 		}
+		s.log.Debug("model request sent ahead", "speech_id", sp.id, "used", aheadOK, "ahead", aheadBy.Round(time.Millisecond))
 	}
 
 	for attempt := 1; ; attempt++ {
@@ -927,7 +928,14 @@ func (p *pipeline) onFirstFrame(sg *seg) {
 	p.mu.Unlock()
 	if first {
 		p.s.setAgentState(AgentSpeaking)
-		p.s.emit(MetricsCollected{Metric: ResponseMetrics{SpeechID: p.sp.id, FirstAudio: time.Since(p.sp.createdAt)}})
+		p.s.startEchoWarmup()
+		m := ResponseMetrics{SpeechID: p.sp.id, FirstAudio: time.Since(p.sp.createdAt)}
+		if !p.sp.userStoppedAt.IsZero() {
+			m.SinceUserStopped = time.Since(p.sp.userStoppedAt)
+		}
+		p.s.log.Debug("reply audio started", "speech_id", p.sp.id,
+			"since_turn_end", m.FirstAudio.Round(time.Millisecond), "since_user_stopped", m.SinceUserStopped.Round(time.Millisecond))
+		p.s.emit(MetricsCollected{Metric: m})
 	}
 	p.s.emit(AgentTranscript{SpeechID: p.sp.id, Text: sg.text})
 }

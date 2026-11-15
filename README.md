@@ -156,8 +156,8 @@ only pauses to think. `turn/smartturn` listens to the user's last 8 seconds and 
 whether the sentence sounds finished.
 
 ```
-user stops ─► VAD: silence ─► Smart Turn ─┬─ finished ────► reply after 500 ms
-                                          └─ unfinished ──► wait up to 3 s for more
+user stops ─► VAD: silence (0.55 s) ─► Smart Turn ─┬─ finished ────► reply at once
+                                                   └─ unfinished ──► wait up to 3 s for more
 ```
 
 ```go
@@ -177,8 +177,8 @@ session, err := agents.NewSession(agents.SessionOptions{
 | Model | [Smart Turn](https://github.com/pipecat-ai/smart-turn) v3.2 by the Pipecat project, BSD 2-Clause, 8.7 MB, embedded |
 | Languages | 23, see the model page |
 | Needs | cgo and the ONNX Runtime library, like `vad/silero` |
-| Cost | About 60 ms of one core per turn on an Apple M4. It runs during the endpointing delay, so a finished turn is not delayed |
-| Delays | `TurnOptions.MinEndpointingDelay` (500 ms), `MaxEndpointingDelay` (3 s), `EndOfTurnThreshold` (0.5) |
+| Cost | About 60 to 90 ms of one core per turn on an Apple M4, added to the turn end when the VAD reports the end of speech after the minimum delay (the default) |
+| Delays | `TurnOptions.MinEndpointingDelay` (500 ms), `MaxEndpointingDelay` (3 s), both counted from the end of the speech; `EndOfTurnThreshold` (0.5) |
 
 The examples use it when ONNX Runtime is found; `TURN_DETECTOR=off` disables it. Any
 other model can be plugged in through the `agents.TurnDetector` interface, which
@@ -281,13 +281,14 @@ integration tests and the Docker build. The end-to-end job is manual.
 | Agent state attribute (`lk.agent.state`) visible to clients | Verified against `livekit-server` 1.13.11 |
 | Transcripts published as `lk.transcription` text streams | Verified manually on 2026-11-13: shown in the Agents Playground chat panel |
 | Live voice call (browser, LiveKit Cloud, Deepgram + Anthropic) | Verified manually on 2026-11-13, one call: conversation, interruption by talking over the agent, no false interruption observed. Not an automated test |
+| Live voice call with the turn features (browser, LiveKit Cloud, Deepgram + Anthropic) | Verified manually on 2026-11-15, one call of two minutes with Silero, Smart Turn, false-interruption handling and preemptive generation: all seven replies used the model request sent ahead. The call showed that the reply came too late; the endpointing delay was then changed to count from the end of the speech. Three more calls the same day showed the agent interrupting itself with its own echo at the start of a call (the echo warm-up was added, and worked in the next call), and the end of speech reported seconds late because the browser sends no audio during silence (`roomio` now inserts silence; not tried in a call yet). Not an automated test |
 | Deepgram, Anthropic and OpenAI providers | Verified against the live APIs on 2026-11-13 with the opt-in `e2e` tests: streaming STT, both LLMs with a tool round trip, both TTS, and the full STT → LLM → TTS pipeline (Deepgram + Anthropic) |
 | LiveKit Cloud connectivity | Verified on 2026-11-13: the explicit-dispatch vertical slice (fake speech providers) passed against a Cloud project, server 1.13.10. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | LiveKit Cloud managed agent deployment | Implemented (hosted-mode worker, health endpoint, `cmd/lkagent`), tested locally. **Not yet run on LiveKit Cloud**, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | Linux arm64 (Docker) | Image builds and the example worker registers with `livekit-server`. The image loads the Silero model at startup |
 | Linux amd64 (GitHub Actions, Ubuntu 26.04) | Unit tests with `-race`, including the Silero VAD and the Smart Turn model, and integration tests on every push |
-| False-interruption pause and resume | Verified by unit tests with a simulated output: nothing lost, nothing played twice. The hold followed by a confirmed interruption also ran over WebRTC in the integration tests. **Not verified:** the resume over WebRTC, and a live call |
-| Smart Turn end-of-turn model | Same model input and same probabilities as the reference Python code on 28 cases; a session waits on a synthesized unfinished sentence and answers a finished one at once; the pipeline test with live providers passed with it on 2026-11-14. **Not verified:** a live call with a person pausing mid-sentence. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) |
+| False-interruption pause and resume | Verified by unit tests with a simulated output: nothing lost, nothing played twice. The hold followed by a confirmed interruption also ran over WebRTC in the integration tests. Also seen in a live call on 2026-11-15: three sounds without words paused the agent, which resumed each time, and two interruptions were confirmed by words |
+| Smart Turn end-of-turn model | Same model input and same probabilities as the reference Python code on 28 cases; a session waits on a synthesized unfinished sentence and answers a finished one at once; the pipeline test with live providers passed with it on 2026-11-14. In a live call on 2026-11-15 it scored "Yeah. I would like to" at 0.005 and the completed sentence at 0.94, and the agent waited; it also scored a short "Thank you. Bye." at 0.24, which delays the reply. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) |
 
 ## Limitations and follow-up work
 

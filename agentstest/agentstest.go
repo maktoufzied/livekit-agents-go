@@ -27,6 +27,7 @@ type STT struct {
 	streams []*sttStream
 	opens   int
 	frames  int
+	loud    int
 	// OpenErrs are returned, in order, by the next calls to Stream.
 	OpenErrs []error
 	// PushDelay makes every Push block that long (a slow provider).
@@ -66,6 +67,13 @@ func (s *STT) Frames() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.frames
+}
+
+// LoudFrames returns how many of the pushed frames were not pure silence.
+func (s *STT) LoudFrames() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loud
 }
 
 // OpenStreams returns the number of streams not yet closed.
@@ -109,7 +117,7 @@ type sttStream struct {
 	ended     chan struct{}
 }
 
-func (st *sttStream) Push(audio.Frame) error {
+func (st *sttStream) Push(f audio.Frame) error {
 	select {
 	case <-st.closed:
 		return fmt.Errorf("agentstest: %w", providers.ErrStreamClosed)
@@ -128,6 +136,12 @@ func (st *sttStream) Push(audio.Frame) error {
 	}
 	st.parent.mu.Lock()
 	st.parent.frames++
+	for _, v := range f.Data {
+		if v != 0 {
+			st.parent.loud++
+			break
+		}
+	}
 	st.parent.mu.Unlock()
 	return nil
 }

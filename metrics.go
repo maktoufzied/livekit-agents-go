@@ -12,14 +12,16 @@ type Metric interface{ metric() }
 // TranscriptionMetrics measures speech-to-text latency for one final
 // transcript.
 type TranscriptionMetrics struct {
-	// Delay is the time between the end of user speech (VAD) and the final
-	// transcript. Zero when no VAD is configured.
+	// Delay is the time between the end of user speech and the final
+	// transcript. With a VAD the end of speech is where the speech stopped,
+	// not where the VAD reported it. Not emitted without a VAD.
 	Delay time.Duration
 }
 
 // EndOfTurnMetrics is emitted when a user turn is committed.
 type EndOfTurnMetrics struct {
 	// Delay is the time between the end of user speech and the commit.
+	// With a VAD it includes the silence the VAD needs to report the end.
 	Delay time.Duration
 }
 
@@ -64,6 +66,11 @@ type ResponseMetrics struct {
 	// FirstAudio is the time between the reply being requested (end of the
 	// user turn) and its first audio frame being queued for playback.
 	FirstAudio time.Duration
+	// SinceUserStopped is the time between the end of the user's speech
+	// and the first audio frame: what the user waits. It adds the turn
+	// detection (EndOfTurnMetrics.Delay) to FirstAudio. Zero for a reply
+	// that does not answer a spoken turn.
+	SinceUserStopped time.Duration
 }
 
 func (TranscriptionMetrics) metric() {}

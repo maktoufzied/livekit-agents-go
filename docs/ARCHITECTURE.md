@@ -123,12 +123,12 @@ sentences and that incremental-input TTS APIs are not used to their full extent.
 
 | Mode | End of turn |
 |---|---|
-| `TurnVAD` (default with a VAD) | VAD reports silence **and** a final transcript exists, then `MinEndpointingDelay` (500 ms) without new speech. |
+| `TurnVAD` (default with a VAD) | VAD reports silence **and** a final transcript exists **and** `MinEndpointingDelay` (500 ms) passed since the speech stopped, without new speech. The silence the VAD needs (550 ms for Silero) counts towards the delay, as upstream. |
 | `TurnSTT` (default without a VAD) | The provider's end-of-speech event, or `MaxEndpointingDelay` after the last final transcript. |
 | `TurnManual` | Only `Session.CommitUserTurn`. |
 
-An optional `TurnDetector` is asked as soon as the delay starts, off the loop, so its
-answer is ready when the delay ends. A probability under the threshold postpones the
+An optional `TurnDetector` is asked as soon as the end of the turn is scheduled, off the
+loop; the turn ends when both its answer and the delay are there. A probability under the threshold postpones the
 turn end to `MaxEndpointingDelay` (3 s); an error or a timeout does not.
 
 The detector receives the conversation and the audio of the turn. The input loop keeps
@@ -139,8 +139,8 @@ or cleared. Nothing is buffered without a `TurnDetector`.
 
 ### Preemptive generation
 
-The model request is sent when the user stops speaking, not when the turn ends, so the
-wait for the first token overlaps the endpointing delay.
+The model request is sent on every final transcript, even while the VAD still waits for
+its silence, so the wait for the first token overlaps the turn detection.
 
 ```
 final transcript, user silent ─► send the model request ─┐ (nothing recorded, no tool runs)
@@ -154,14 +154,20 @@ The request is kept only if it is exactly the request the reply would send: same
 history, same user text, same tools. It is thrown away when the user goes on speaking
 (new transcript), when the history changed in between, or when the turn is cleared. It
 is not started while a speech is running or queued, because the history is about to
-change, and at most three are started per turn. A failure of the request counts as the
+change, at most three are started per turn, and none once the user has been speaking
+for more than 10 s, as upstream. A failure of the request counts as the
 first attempt of the reply, with the usual retry rules. `LLMMetrics.Preemptive` tells how
 far ahead the request was sent. `TurnOptions.DisablePreemptiveGeneration` turns it off;
 a request that is thrown away is still billed by the provider.
 
-Measured on 2026-11-14 with Deepgram and Anthropic (`claude-haiku-5-5`), three
-runs each of the live pipeline test: first audio 0.58 s, 0.66 s and 0.97 s after the end
-of the turn with it, 1.13 s, 1.19 s and 1.57 s without.
+Measured with Deepgram and Anthropic (`claude-haiku-5-5`), three runs each of the live
+pipeline test, from the end of the turn to the first audio: 0.58 s, 0.66 s and 0.97 s
+with it, 1.13 s, 1.19 s and 1.57 s without (2026-11-14).
+
+What the user waits is longer: it starts when they stop speaking
+(`ResponseMetrics.SinceUserStopped`). On 2026-11-15, three runs: 0.96 s, 1.11 s and
+1.22 s. About 0.58 s of it is the silence Silero needs, 0.08 s the end-of-turn model,
+and the rest mostly the first audio of the synthesis.
 
 ### Interruption
 
@@ -171,16 +177,39 @@ transcribed words. Without a VAD, any transcribed word interrupts. A committed u
 also cancels speeches that are still pending for an older turn.
 
 A VAD cannot tell a cough from a word, so the sound alone only puts the running speech
-on hold. Words decide:
+on hold. Words decide. The rules are those of the Python framework:
 
 ```
 VAD: 500 ms of sound ─► hold: output silenced, queued audio taken back
                           │
-                          ├─ a transcript arrives ──────────────► interruption (steps below)
-                          └─ silence for FalseInterruptionTimeout (2 s), no transcript
+                          ├─ a final transcript, or the user turn ends ─► interruption (steps below)
+                          └─ the sound stops, then FalseInterruptionTimeout (2 s)
+                             of silence without a final transcript
                                                       ─► resume where it stopped,
                                                          emit FalseInterruption
 ```
+
+| Case | What happens |
+|---|---|
+| Sound while a reply is prepared but not audible yet | Its audio is held back until the sound stops, then plays at once |
+| The user makes a sound again during the 2 s | The timer restarts when that sound stops |
+| Interim transcripts | They do not decide; only a final transcript does |
+| A final transcript the VAD did not notice | It interrupts all the same |
+| Sound that never stops and is never transcribed | The speech stays on hold. Noise cancellation on the input is the remedy, as upstream |
+
+On hold, the playout goroutine clears the output itself (it stays the only writer),
+takes back the frames that were queued but not played, down to the sample, and plays
+them first when released. The model and the synthesis keep running against their
+bounded buffers. Nothing is said twice and nothing is lost. The agent state is
+`listening` during the hold. A negative `FalseInterruptionTimeout` disables the hold:
+the sound alone interrupts.
+
+**Echo warm-up.** Echo cancellation runs on the user's device and needs a moment to
+adapt. Until then the microphone returns the agent's own voice, which would interrupt
+the agent and be transcribed as a user turn. For `EchoWarmup` (3 s) from the agent's
+first audio of the session, and while the agent speaks, sound does not interrupt and
+the recognizer receives silence. A sound still going on when the warm-up ends is looked
+at again. The warm-up cannot help a client without echo cancellation.
 
 On hold, the playout goroutine clears the output itself (it stays the only writer),
 takes back the frames that were queued but not played, down to the sample, and plays

@@ -46,6 +46,7 @@ func entrypoint(ctx context.Context, job *agents.Job) error {
 	if err != nil {
 		return err
 	}
+	setup.LogMetrics(session, job.Logger())
 
 	// Log what happens in the conversation.
 	session.On(func(ev agents.Event) {

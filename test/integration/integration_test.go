@@ -133,11 +133,14 @@ func TestVoiceAgentVerticalSlice(t *testing.T) {
 		ttsFake.Tone = true
 		ttsFake.PerChar = 60 * time.Millisecond // the long reply lasts ~18s
 		s, err := agents.NewSession(agents.SessionOptions{
-			Agent:  &agents.Agent{Instructions: "integration test agent"},
-			STT:    &agentstest.EnergySTT{Script: []string{"tell me something long", "stop, I have another question"}},
-			LLM:    agentstest.NewLLM(agentstest.Text(longReply), agentstest.Text("Sure. Here is a short second answer.")),
-			TTS:    ttsFake,
-			VAD:    vad.NewEnergy(vad.EnergyOptions{}),
+			Agent: &agents.Agent{Instructions: "integration test agent"},
+			STT:   &agentstest.EnergySTT{Script: []string{"tell me something long", "stop, I have another question"}},
+			LLM:   agentstest.NewLLM(agentstest.Text(longReply), agentstest.Text("Sure. Here is a short second answer.")),
+			TTS:   ttsFake,
+			VAD:   vad.NewEnergy(vad.EnergyOptions{}),
+			// The test interrupts the agent two seconds into its first
+			// reply, and its microphone has no echo.
+			Turn:   agents.TurnOptions{EchoWarmup: -1},
 			Logger: job.Logger(),
 		})
 		if err != nil {

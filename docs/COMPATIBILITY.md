@@ -77,10 +77,13 @@ identical behaviour to upstream.
 | VAD | Silero (model) | Silero (same model file, see below) and an energy detector |
 | Turn detection | VAD, STT, realtime, LiveKit turn-detector model (text) | VAD, STT, manual, Smart Turn model (audio, see below) |
 | Interruptions | Yes | Yes |
-| False-interruption handling | Pause, then resume when no transcript follows (2 s) | Same idea, same default; see [ARCHITECTURE.md](ARCHITECTURE.md#interruption). Checked with fake providers only |
+| False-interruption handling | Pause on 0.5 s of sound; a final transcript or the end of the turn interrupts; resume 2 s after the sound stops otherwise | Same rules and defaults, read from `agent_activity.py` of 1.8.12; see [ARCHITECTURE.md](ARCHITECTURE.md#interruption) |
+| Echo warm-up (`aec_warmup_duration`) | 3 s from the first agent speech: no interruption, silence to the recognizer | Same, `TurnOptions.EchoWarmup` |
 | Adaptive interruption detection (model that tells backchannels from interruptions) | Yes | No |
 | History truncation on interruption | Aligned transcripts when the TTS provides them | Per sentence plus played fraction |
-| Preemptive generation | Yes: model request, optionally synthesis too; skipped after 10 s of user speech | Model request only, on by default, at most 3 per turn; no limit on speech length. See [ARCHITECTURE.md](ARCHITECTURE.md#preemptive-generation) |
+| Preemptive generation | Yes: model request, optionally synthesis too; at most 3 per turn, skipped after 10 s of user speech | Model request only, on by default, same two limits. See [ARCHITECTURE.md](ARCHITECTURE.md#preemptive-generation) |
+| Endpointing delay | 0.5 s to 3 s, counted from the end of the speech | Same |
+| Audio while the user is silent | Continuous: the WebRTC audio stack fills what the browser does not send (Opus DTX) | Continuous: `roomio` inserts silence when the received audio falls 100 ms behind real time |
 | Tool calling | Yes | Yes |
 | Agent handoffs, tasks, workflows | Yes | No |
 | `Say`, `GenerateReply` | Yes | Yes |
@@ -210,7 +213,14 @@ The first, third and fourth rows of the comparison are kept as tests
 `SMARTTURN_FP32_MODEL` points at the unquantized model. The session behaviour is
 `TestSessionWaitsForUnfinishedSentence`. References come from
 `turn/smartturn/testdata/reference.py`. Not checked: recordings of real people
-hesitating (the two sentences are synthesized voices), other languages and a live call.
+hesitating in a recording (the two sentences are synthesized voices) and other languages.
+
+In one live call (2026-11-15, English, browser microphone) the model scored 13 turn
+ends. It kept the agent waiting on "Yeah. I would like to" (0.005) and on a long
+sentence paused twice (0.37, 0.34), and let it answer when they were completed (0.94,
+0.95). Two short utterances scored low although they were complete: "Thank you. Bye."
+(0.24) and a "Hello." preceded by background noise (0.42); the reply then waits for
+`MaxEndpointingDelay`.
 
 The numbers above are from arm64 (Apple M4). ONNX Runtime computes 8-bit models
 differently on x86: on the CI machine (Linux amd64) the embedded model gives the same

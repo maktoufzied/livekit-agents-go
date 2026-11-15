@@ -116,7 +116,9 @@ type TurnInput struct {
 type TurnOptions struct {
 	Mode TurnMode
 	// MinEndpointingDelay is the silence required after the user stops
-	// before the turn is committed. Default 500ms.
+	// before the turn is committed. Default 500ms. It counts from the end
+	// of the speech: the silence the VAD needs to report that end (550 ms
+	// for Silero) is part of it, not added to it.
 	MinEndpointingDelay time.Duration
 	// MaxEndpointingDelay is the longest wait when the TurnDetector thinks
 	// the user is not done, and the fallback in TurnSTT. Default 3s.
@@ -139,13 +141,20 @@ type TurnOptions struct {
 	// Tools never run and nothing is recorded before the turn has ended.
 	DisablePreemptiveGeneration bool
 	// FalseInterruptionTimeout is how long the agent stays silent after a
-	// sound that interrupted it but was not followed by any transcript (a
-	// cough, a door, background voices). The speech is only paused when
-	// the VAD hears the sound, is cut for good as soon as words are
-	// transcribed, and resumes where it stopped when this much time passed
-	// after the sound without any. Default 2s; negative disables the pause,
-	// so that any sound the VAD takes for speech cuts the agent for good.
+	// sound that interrupted it but was not followed by a final transcript
+	// (a cough, a door, background voices). The speech is only paused when
+	// the VAD hears the sound, is cut for good by a final transcript or by
+	// the end of the user turn, and resumes where it stopped when this much
+	// silence followed the sound. Default 2s, as upstream; negative
+	// disables the pause, so that any sound the VAD takes for speech cuts
+	// the agent for good.
 	FalseInterruptionTimeout time.Duration
+	// EchoWarmup is how long, from the agent's first audio of the session,
+	// sound cannot interrupt it and is not sent to the recognizer while it
+	// speaks. Echo cancellation on the user's device needs a moment to
+	// adapt; until then the microphone returns the agent's own voice, and
+	// the agent would interrupt itself. Default 3s; negative disables.
+	EchoWarmup time.Duration
 }
 
 // ToolOptions configures tool execution.
@@ -268,6 +277,9 @@ func (o *SessionOptions) setDefaults() error {
 	def(&o.Turn.MinInterruptionDuration, 500*time.Millisecond)
 	if o.Turn.FalseInterruptionTimeout == 0 {
 		o.Turn.FalseInterruptionTimeout = 2 * time.Second
+	}
+	if o.Turn.EchoWarmup == 0 {
+		o.Turn.EchoWarmup = 3 * time.Second
 	}
 	if o.Turn.EndOfTurnThreshold <= 0 {
 		o.Turn.EndOfTurnThreshold = 0.5

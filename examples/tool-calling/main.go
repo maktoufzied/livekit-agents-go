@@ -108,6 +108,7 @@ func entrypoint(ctx context.Context, job *agents.Job) error {
 	if err != nil {
 		return err
 	}
+	setup.LogMetrics(session, job.Logger())
 	session.On(func(ev agents.Event) {
 		switch e := ev.(type) {
 		case agents.ToolCallStarted:

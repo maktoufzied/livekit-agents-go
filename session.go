@@ -51,6 +51,8 @@ type Session struct {
 	closeErr    error
 	done        chan struct{}
 
+	warmupOnce    sync.Once
+	warmupUntil   atomic.Int64 // end of the echo warm-up, Unix nanoseconds; 0 before it starts
 	speechSeq     atomic.Int64
 	msgSeq        atomic.Int64
 	droppedFrames atomic.Int64
@@ -65,18 +67,22 @@ type Session struct {
 type turnState struct {
 	userSpeaking  bool
 	speechEndedAt time.Time
-	finals        []string
-	interim       string
-	eouGen        uint64 // invalidates pending end-of-turn timers
-	eouExtended   bool
-	bargeGen      uint64 // invalidates pending interruption timers
-	wantInterrupt bool   // speech lasted long enough, waiting for words
+	// speechStartedAt is when the sound the VAD last reported began.
+	speechStartedAt time.Time
+	finals          []string
+	interim         string
+	eouGen          uint64 // invalidates pending end-of-turn timers
+	eouExtended     bool
+	bargeGen        uint64 // invalidates pending interruption timers
+	wantInterrupt   bool   // speech lasted long enough, waiting for words
 
 	// held is the speech put on hold by a sound that may or may not be an
 	// interruption; nil when none. The speech may have ended since.
 	held    *SpeechHandle
 	heldAt  time.Time
 	heldGen uint64 // invalidates pending resume timers
+	// heldFor is the silence after which the speech on hold resumes.
+	heldFor time.Duration
 
 	// preempt is the model request started ahead of the end of the turn;
 	// nil when none. preemptCount counts those started in this turn.
@@ -581,6 +587,10 @@ func (s *Session) inputLoop() {
 				s.post(func() { s.onVAD(ev, pos) })
 			}
 		}
+		if s.echoWarmupActive() {
+			// The recognizer must not transcribe the agent's own voice.
+			f = audio.Frame{Data: make([]int16, len(f.Data)), SampleRate: f.SampleRate, Channels: f.Channels}
+		}
 		// Bounded hand-off: never block the audio source on a slow STT
 		// provider; drop the oldest frame instead.
 		select {
@@ -690,9 +700,11 @@ func (s *Session) runSTTStream() (gotEvent bool, err error) {
 // onVAD handles a VAD event raised when the input stood at position pos.
 func (s *Session) onVAD(ev vad.Event, pos int64) {
 	t := &s.turn
+	s.log.Debug("vad", "event", ev.Type.String(), "speech", ev.SpeechDuration.Round(time.Millisecond), "silence", ev.SilenceDuration.Round(time.Millisecond))
 	switch ev.Type {
 	case vad.SpeechStart:
 		t.heldGen++ // the user makes a sound again: do not resume yet
+		t.speechStartedAt = time.Now().Add(-ev.SpeechDuration)
 		s.markTurnAudio(pos, ev.SpeechDuration)
 		if s.turnAudio != nil {
 			s.turnAudio.resumed()
@@ -703,10 +715,24 @@ func (s *Session) onVAD(ev vad.Event, pos int64) {
 		if s.opts.Turn.DisableInterruptions || !s.hasInterruptibleSpeech() {
 			return
 		}
+		if s.AgentState() != AgentSpeaking {
+			// A reply is being prepared and the user makes a sound: its
+			// audio waits until the sound is over, however short it is.
+			if s.opts.Turn.FalseInterruptionTimeout >= 0 {
+				s.hold(0)
+			}
+		}
 		t.bargeGen++
 		gen := t.bargeGen
-		s.after(s.opts.Turn.MinInterruptionDuration-ev.SpeechDuration, func() {
+		var qualify func()
+		qualify = func() {
 			if gen != t.bargeGen || !t.userSpeaking {
+				return
+			}
+			if left := s.echoWarmupLeft(); left > 0 {
+				// Most likely the agent's own voice. A sound that outlasts
+				// the warm-up is looked at again.
+				s.after(left, qualify)
 				return
 			}
 			if s.opts.Turn.MinInterruptionWords > 0 {
@@ -715,18 +741,21 @@ func (s *Session) onVAD(ev vad.Event, pos int64) {
 				return
 			}
 			s.holdOrInterrupt()
-		})
+		}
+		s.after(s.opts.Turn.MinInterruptionDuration-ev.SpeechDuration, qualify)
 	case vad.SpeechEnd:
 		if s.turnAudio != nil {
 			s.turnAudio.stopped(pos, ev.SilenceDuration)
 		}
 		t.userSpeaking = false
-		t.speechEndedAt = time.Now()
+		// The speech ended before the silence that confirmed it: delays
+		// count from there, so the VAD's silence is not waited twice.
+		t.speechEndedAt = time.Now().Add(-ev.SilenceDuration)
 		t.bargeGen++
 		t.wantInterrupt = false
 		s.setUserState(UserListening)
 		if len(t.finals) > 0 {
-			s.scheduleEOU(s.opts.Turn.MinEndpointingDelay)
+			s.scheduleEOU(s.opts.Turn.MinEndpointingDelay - time.Since(t.speechEndedAt))
 		}
 		s.scheduleResume()
 	}
@@ -749,7 +778,6 @@ func (s *Session) onSTT(ev stt.Event) {
 		}
 		t.interim = ev.Text
 		s.emit(UserTranscript{Text: ev.Text, Language: ev.Language})
-		s.confirmInterruption()
 		if !hasVAD {
 			if !t.userSpeaking {
 				// The words were said before they were transcribed.
@@ -767,8 +795,11 @@ func (s *Session) onSTT(ev stt.Event) {
 		}
 		t.finals = append(t.finals, text)
 		t.interim = ""
+		s.log.Debug("final transcript", "text", text, "user_speaking", t.userSpeaking)
 		s.emit(UserTranscript{Text: text, Final: true, Language: ev.Language})
-		s.confirmInterruption()
+		if hasVAD {
+			s.interruptByTranscript()
+		}
 		if hasVAD && !t.userSpeaking && !t.speechEndedAt.IsZero() {
 			s.emit(MetricsCollected{Metric: TranscriptionMetrics{Delay: time.Since(t.speechEndedAt)}})
 		}
@@ -779,7 +810,10 @@ func (s *Session) onSTT(ev stt.Event) {
 			s.setUserState(UserListening)
 		}
 		if t.userSpeaking {
-			return // the VAD speech end will schedule the end of turn
+			// The VAD speech end will schedule the end of turn. The reply
+			// is prepared already: the user may well be done.
+			s.preempt()
+			return
 		}
 		switch s.opts.Turn.Mode {
 		case TurnSTT:
@@ -825,43 +859,62 @@ func (s *Session) bargeIn() {
 	}
 }
 
-// holdOrInterrupt reacts to a sound the VAD took for speech while the agent
-// speaks, before any word was transcribed. The speech is put on hold: words
-// will confirm the interruption, silence will resume the speech. When that
-// is disabled the speech is interrupted at once.
+// holdOrInterrupt reacts to a sound the VAD took for speech and that lasted
+// long enough to interrupt, before any final transcript. The running speech
+// is put on hold: a final transcript or the end of the user turn will
+// interrupt it for good, FalseInterruptionTimeout of silence will resume it.
+// When holding is disabled, or nothing is running that could be resumed,
+// speeches are interrupted at once.
 func (s *Session) holdOrInterrupt() {
+	if s.opts.Turn.FalseInterruptionTimeout < 0 || !s.hold(s.opts.Turn.FalseInterruptionTimeout) {
+		s.bargeIn()
+	}
+}
+
+// hold puts the running speech on hold until resumeAfter of silence, and
+// reports whether it is on hold. A speech already on hold keeps the longer
+// of its delays.
+func (s *Session) hold(resumeAfter time.Duration) bool {
 	t := &s.turn
-	if s.opts.Turn.FalseInterruptionTimeout < 0 {
-		s.bargeIn()
-		return
-	}
 	sp := s.runningSpeech()
-	if t.held != nil && t.held == sp && !sp.Interrupted() {
-		return // already on hold
-	}
 	if sp == nil || !sp.allowInterruptions || sp.Interrupted() {
-		// Only queued speeches can be interrupted: nothing is playing
-		// that could be resumed.
-		s.bargeIn()
+		return false
+	}
+	if t.held == sp {
+		t.heldFor = max(t.heldFor, resumeAfter)
+		return true
+	}
+	if !sp.hold.set(true) {
+		return false
+	}
+	t.held, t.heldAt, t.heldFor = sp, time.Now(), resumeAfter
+	t.heldGen++
+	s.log.Debug("agent speech on hold", "speech_id", sp.id)
+	return true
+}
+
+// interruptByTranscript is called on a final transcript: the user said
+// words, so whatever the agent says or prepares is interrupted, whether the
+// VAD noticed the speech or not.
+func (s *Session) interruptByTranscript() {
+	t := &s.turn
+	if s.opts.Turn.DisableInterruptions || s.echoWarmupLeft() > 0 {
 		return
 	}
-	if sp.hold.set(true) {
-		t.held, t.heldAt = sp, time.Now()
-		t.heldGen++
-		s.log.Debug("agent speech on hold", "speech_id", sp.id)
+	if n := s.opts.Turn.MinInterruptionWords; n > 0 {
+		words := 0
+		for _, f := range t.finals {
+			words += len(strings.Fields(f))
+		}
+		if words < n {
+			return
+		}
 	}
+	s.bargeIn()
 }
 
-// confirmInterruption is called when words of the user are transcribed:
-// the sound that put a speech on hold was an interruption.
-func (s *Session) confirmInterruption() {
-	if s.turn.held != nil {
-		s.bargeIn()
-	}
-}
-
-// scheduleResume arms the timer that resumes the speech on hold when the
-// user is silent and nothing was transcribed.
+// scheduleResume arms the timer that resumes the speech on hold, when the
+// user stops making sound.
 func (s *Session) scheduleResume() {
 	t := &s.turn
 	if t.held == nil {
@@ -869,9 +922,12 @@ func (s *Session) scheduleResume() {
 	}
 	t.heldGen++
 	gen := t.heldGen
-	s.after(s.opts.Turn.FalseInterruptionTimeout, func() {
+	s.after(t.heldFor, func() {
 		if gen != t.heldGen || t.held == nil || t.userSpeaking {
 			return
+		}
+		if len(t.finals) > 0 {
+			return // the turn is about to end and will interrupt the speech
 		}
 		sp := t.held
 		t.held = nil
@@ -880,6 +936,33 @@ func (s *Session) scheduleResume() {
 			s.emit(FalseInterruption{SpeechID: sp.id, Paused: time.Since(t.heldAt)})
 		}
 	})
+}
+
+// startEchoWarmup opens the window during which the agent cannot be
+// interrupted by sound, at its first audio.
+func (s *Session) startEchoWarmup() {
+	if d := s.opts.Turn.EchoWarmup; d > 0 {
+		s.warmupOnce.Do(func() {
+			s.warmupUntil.Store(time.Now().Add(d).UnixNano())
+			s.log.Debug("echo warm-up, the agent cannot be interrupted by sound", "for", d)
+		})
+	}
+}
+
+// echoWarmupLeft returns how much of the echo warm-up is left; zero when it
+// has not started or is over.
+func (s *Session) echoWarmupLeft() time.Duration {
+	until := s.warmupUntil.Load()
+	if until == 0 {
+		return 0
+	}
+	return max(0, time.Until(time.Unix(0, until)))
+}
+
+// echoWarmupActive reports whether what the microphone picks up now may be
+// the agent's own voice, not yet cancelled on the user's side.
+func (s *Session) echoWarmupActive() bool {
+	return s.echoWarmupLeft() > 0 && s.AgentState() == AgentSpeaking
 }
 
 // runningSpeech returns the speech at the head of the queue, the only one
@@ -900,15 +983,14 @@ const sttStartLag = 500 * time.Millisecond
 // markTurnAudio notes that the user started speaking ago before the input
 // stood at position at. The
 // first speech of a turn sets the start of the audio given to the
-// TurnDetector. Speech that follows an unanswered sound with no transcript
+// TurnDetector. Speech that follows a sound of which nothing was transcribed
 // (a noise, or a turn that was cleared) starts over.
 func (s *Session) markTurnAudio(at int64, ago time.Duration) {
 	if s.turnAudio == nil {
 		return
 	}
 	t := &s.turn
-	stale := len(t.finals) == 0 && t.interim == "" &&
-		time.Since(t.speechEndedAt) > s.opts.Turn.MaxEndpointingDelay
+	stale := len(t.finals) == 0 && t.interim == ""
 	s.turnAudio.mark(at, ago, stale)
 }
 
@@ -955,7 +1037,11 @@ func (s *Session) armEOU(d time.Duration) {
 		}
 		if ask && prob < s.opts.Turn.EndOfTurnThreshold {
 			t.eouExtended = true
-			s.armEOU(s.opts.Turn.MaxEndpointingDelay - s.opts.Turn.MinEndpointingDelay)
+			wait := s.opts.Turn.MaxEndpointingDelay - s.opts.Turn.MinEndpointingDelay
+			if s.opts.VAD != nil && !t.speechEndedAt.IsZero() {
+				wait = s.opts.Turn.MaxEndpointingDelay - time.Since(t.speechEndedAt)
+			}
+			s.armEOU(wait)
 			return
 		}
 		s.commitUserTurn()
@@ -982,6 +1068,8 @@ func (s *Session) armEOU(d time.Duration) {
 				s.reportError(SourceTurnDetector, err, true)
 				p = 1 // without an answer the silence decides
 			}
+			s.log.Debug("end-of-turn model", "probability", p, "finished", p >= s.opts.Turn.EndOfTurnThreshold,
+				"audio", in.Audio.Duration().Round(10*time.Millisecond), "text", in.History[len(in.History)-1].Content)
 			s.post(func() {
 				prob, waiting = p, false
 				if elapsed {
@@ -1016,8 +1104,10 @@ func (s *Session) commitUserTurn() {
 	if text == "" {
 		return
 	}
-	if !t.speechEndedAt.IsZero() {
-		s.emit(MetricsCollected{Metric: EndOfTurnMetrics{Delay: time.Since(t.speechEndedAt)}})
+	stoppedAt := t.speechEndedAt
+	t.speechEndedAt = time.Time{}
+	if !stoppedAt.IsZero() {
+		s.emit(MetricsCollected{Metric: EndOfTurnMetrics{Delay: time.Since(stoppedAt)}})
 	}
 	// The user said something new: anything the agent is still saying or
 	// about to say answers an older turn.
@@ -1035,6 +1125,7 @@ func (s *Session) commitUserTurn() {
 		userMsg:            &msg,
 		preempt:            pre,
 		preemptAt:          t.preemptAt,
+		userStoppedAt:      stoppedAt,
 	}); err != nil {
 		if pre != nil {
 			pre.discard()
