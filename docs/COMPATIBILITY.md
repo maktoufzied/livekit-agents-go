@@ -77,7 +77,8 @@ identical behaviour to upstream.
 | VAD | Silero (model) | Silero (same model file, see below) and an energy detector |
 | Turn detection | VAD, STT, realtime, LiveKit turn-detector model (text) | VAD, STT, manual, Smart Turn model (audio, see below) |
 | Interruptions | Yes | Yes |
-| Adaptive / false-interruption handling | Yes | No |
+| False-interruption handling | Pause, then resume when no transcript follows (2 s) | Same idea, same default; see [ARCHITECTURE.md](ARCHITECTURE.md#interruption). Checked with fake providers only |
+| Adaptive interruption detection (model that tells backchannels from interruptions) | Yes | No |
 | History truncation on interruption | Aligned transcripts when the TTS provides them | Per sentence plus played fraction |
 | Preemptive generation | Yes | No |
 | Tool calling | Yes | Yes |
@@ -237,7 +238,7 @@ Their unit tests use local servers that replay documented message shapes. The op
 | Milestone | Content |
 |---|---|
 | 0.2 Hardening | First managed deployment on LiveKit Cloud with `lkagent`. More real-voice testing (noise, echo, several languages). |
-| 0.3 Turn quality | Silero VAD: done. End-of-turn model (Smart Turn): done. False-interruption recovery. Preemptive generation. |
+| 0.3 Turn quality | Silero VAD: done. End-of-turn model (Smart Turn): done. False-interruption recovery: done. Preemptive generation. |
 | 0.4 Realtime | Wire `realtime.Model` into the session, with one provider. |
 | 0.5 Audio | Streaming-input TTS with aligned transcripts. Evaluate a cgo-free Opus path with `pion/opus`. |
 | Later | Handoffs and tasks, text input, telephony helpers, video, more providers, OpenTelemetry export, newer `protocol` messages (`GoAway`, join timing, job tokens). |

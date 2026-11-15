@@ -197,13 +197,30 @@ func TestTurnProducesSpokenReply(t *testing.T) {
 }
 
 func TestInterruptionTruncatesHistoryAndStopsAudio(t *testing.T) {
-	h := newHarness(t, []agentstest.Response{agentstest.Text(longReply), agentstest.Text("Sure, new answer.")}, withVAD()).start()
+	// The sound alone puts the speech on hold; the first transcribed word
+	// makes it an interruption.
+	t.Run("confirmed by a transcript", func(t *testing.T) { testInterruption(t, 0, true) })
+	// Without the hold, the sound alone interrupts.
+	t.Run("hold disabled", func(t *testing.T) { testInterruption(t, -1, false) })
+}
+
+func testInterruption(t *testing.T, falseInterruptionTimeout time.Duration, words bool) {
+	h := newHarness(t, []agentstest.Response{agentstest.Text(longReply), agentstest.Text("Sure, new answer.")}, withVAD(), withOpts(func(o *agents.SessionOptions) {
+		o.Turn.FalseInterruptionTimeout = falseInterruptionTimeout
+	})).start()
 	h.userSays("tell me a story")
 	waitFor(t, "agent speaking", func() bool { return h.s.AgentState() == agents.AgentSpeaking })
 	time.Sleep(60 * time.Millisecond) // ~1.2s of audio at 20x
 
 	// The user barges in: speech longer than MinInterruptionDuration.
 	h.in.PushTone(200 * time.Millisecond)
+	if words {
+		waitFor(t, "speech on hold", func() bool { return h.s.AgentState() == agents.AgentListening })
+		if n := len(eventsOf[agents.SpeechFinished](h)); n != 0 {
+			t.Fatalf("the sound alone finished %d speeches", n)
+		}
+		h.stt.Interim("actually")
+	}
 	first := h.waitSpeeches(1)[0]
 	if !first.Interrupted || first.Err != nil {
 		t.Fatalf("expected interruption, got %+v", first)
@@ -254,6 +271,99 @@ func TestInterruptionTruncatesHistoryAndStopsAudio(t *testing.T) {
 	msgs = h.s.History().Messages()
 	if roles(msgs) != "user,assistant,user,assistant" || msgs[3].Content != "Sure, new answer." {
 		t.Fatalf("history: %+v", msgs)
+	}
+}
+
+// A sound that is not followed by any transcript pauses the agent, which
+// then resumes where it stopped: nothing is lost and nothing is said twice.
+func TestFalseInterruptionResumesTheSpeech(t *testing.T) {
+	h := newHarness(t, []agentstest.Response{agentstest.Text(longReply)}, withVAD(), withOpts(func(o *agents.SessionOptions) {
+		o.Turn.FalseInterruptionTimeout = 150 * time.Millisecond
+	})).start()
+	h.userSays("tell me a story")
+	waitFor(t, "agent speaking", func() bool { return h.s.AgentState() == agents.AgentSpeaking })
+	time.Sleep(40 * time.Millisecond)
+
+	// A cough: loud enough and long enough to interrupt, but no words.
+	h.in.PushTone(200 * time.Millisecond)
+	waitFor(t, "speech on hold", func() bool { return h.s.AgentState() == agents.AgentListening })
+	held := len(h.out.Frames())
+	h.in.PushSilence(300 * time.Millisecond)
+	time.Sleep(80 * time.Millisecond)
+	if n := len(h.out.Frames()); n != held {
+		t.Fatalf("%d frames written while on hold", n-held)
+	}
+	if h.s.AgentState() != agents.AgentListening {
+		t.Fatalf("agent state on hold = %v", h.s.AgentState())
+	}
+
+	waitFor(t, "speech resumed", func() bool { return h.s.AgentState() == agents.AgentSpeaking })
+	fin := h.waitSpeeches(1)[0]
+	if fin.Interrupted || fin.Err != nil {
+		t.Fatalf("speech: %+v", fin)
+	}
+	fi := eventsOf[agents.FalseInterruption](h)
+	if len(fi) != 1 || fi[0].SpeechID != fin.SpeechID || fi[0].Paused < 150*time.Millisecond {
+		t.Fatalf("false interruption events: %+v", fi)
+	}
+
+	var synthesized time.Duration
+	for _, m := range metricsOf[agents.TTSMetrics](h) {
+		synthesized += m.AudioDuration
+	}
+	// Everything synthesized was heard, once, to the millisecond.
+	if d := fin.PlayedDuration - synthesized; d < -time.Millisecond || d > time.Millisecond {
+		t.Fatalf("played %v of %v synthesized", fin.PlayedDuration, synthesized)
+	}
+	if d := h.out.Played() - synthesized; d < -time.Millisecond || d > time.Millisecond {
+		t.Fatalf("the output played %v, want %v", h.out.Played(), synthesized)
+	}
+	// Sentences were played in order.
+	var last int16
+	for _, f := range h.out.Frames() {
+		if f.Marker < last {
+			t.Fatalf("sentence %d played after sentence %d", f.Marker, last)
+		}
+		last = f.Marker
+	}
+	msgs := h.s.History().Messages()
+	if roles(msgs) != "user,assistant" || msgs[1].Interrupted || msgs[1].Content != longReply {
+		t.Fatalf("history: %+v", msgs)
+	}
+	if len(metricsOf[agents.InterruptionMetrics](h)) != 0 {
+		t.Fatal("a false interruption was counted as an interruption")
+	}
+}
+
+// A speech on hold can still be interrupted for good: by the application,
+// or by the user speaking again and being transcribed.
+func TestSpeechOnHoldCanBeInterrupted(t *testing.T) {
+	h := newHarness(t, []agentstest.Response{agentstest.Text(longReply), agentstest.Text("New answer.")}, withVAD(), withOpts(func(o *agents.SessionOptions) {
+		o.Turn.FalseInterruptionTimeout = 10 * time.Second
+	})).start()
+	h.userSays("tell me a story")
+	waitFor(t, "agent speaking", func() bool { return h.s.AgentState() == agents.AgentSpeaking })
+	h.in.PushTone(200 * time.Millisecond)
+	waitFor(t, "speech on hold", func() bool { return h.s.AgentState() == agents.AgentListening })
+	h.in.PushSilence(200 * time.Millisecond)
+
+	h.s.Interrupt()
+	first := h.waitSpeeches(1)[0]
+	if !first.Interrupted {
+		t.Fatalf("speech: %+v", first)
+	}
+	if msgs := h.s.History().Messages(); !msgs[len(msgs)-1].Interrupted || !strings.HasPrefix(longReply, msgs[len(msgs)-1].Content) {
+		t.Fatalf("history: %+v", msgs)
+	}
+	if len(eventsOf[agents.FalseInterruption](h)) != 0 {
+		t.Fatal("unexpected false interruption event")
+	}
+
+	// The next reply plays normally.
+	h.userSays("something else")
+	second := h.waitSpeeches(2)[1]
+	if second.Interrupted || second.Err != nil {
+		t.Fatalf("second speech: %+v", second)
 	}
 }
 

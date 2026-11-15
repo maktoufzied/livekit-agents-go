@@ -76,6 +76,15 @@ type SpeechFinished struct {
 	Err error
 }
 
+// FalseInterruption is emitted when a speech that was paused because the
+// user seemed to interrupt is resumed: the sound was not followed by any
+// transcript.
+type FalseInterruption struct {
+	SpeechID string
+	// Paused is how long the speech was on hold.
+	Paused time.Duration
+}
+
 // ToolCallStarted is emitted before a tool handler runs.
 type ToolCallStarted struct {
 	SpeechID string
@@ -141,6 +150,7 @@ func (AgentTranscript) sessionEvent()       {}
 func (ConversationItemAdded) sessionEvent() {}
 func (SpeechStarted) sessionEvent()         {}
 func (SpeechFinished) sessionEvent()        {}
+func (FalseInterruption) sessionEvent()     {}
 func (ToolCallStarted) sessionEvent()       {}
 func (ToolCallFinished) sessionEvent()      {}
 func (MetricsCollected) sessionEvent()      {}

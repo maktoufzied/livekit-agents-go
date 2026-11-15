@@ -33,6 +33,66 @@ type SpeechHandle struct {
 	doneOnce sync.Once
 	done     chan struct{}
 	err      error
+
+	hold holdGate
+}
+
+// holdGate pauses the playout of a speech while the session finds out
+// whether the user really interrupted. The loop goroutine sets it, the
+// playout goroutine obeys it.
+type holdGate struct {
+	mu      sync.Mutex
+	held    bool
+	changed chan struct{}      // closed on every change of held
+	abort   context.CancelFunc // cancels the output write in flight
+}
+
+// set changes the state and reports whether it changed. Holding aborts the
+// write in flight, so that playout stops at once.
+func (g *holdGate) set(held bool) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.held == held {
+		return false
+	}
+	g.held = held
+	if g.changed != nil {
+		close(g.changed)
+		g.changed = nil
+	}
+	if held && g.abort != nil {
+		g.abort()
+	}
+	return true
+}
+
+// state returns whether playout is held and a channel closed on the next
+// change.
+func (g *holdGate) state() (held bool, changed <-chan struct{}) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.changed == nil {
+		g.changed = make(chan struct{})
+	}
+	return g.held, g.changed
+}
+
+// beginWrite registers the cancel function of an output write. It returns
+// false, without registering, when playout is held.
+func (g *holdGate) beginWrite(abort context.CancelFunc) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.held {
+		return false
+	}
+	g.abort = abort
+	return true
+}
+
+func (g *holdGate) endWrite() {
+	g.mu.Lock()
+	g.abort = nil
+	g.mu.Unlock()
 }
 
 // ID returns the unique speech identifier.

@@ -241,7 +241,7 @@ the server dispatches it to every new room.
 | Worker | Registration, job requests, accept/reject, assignment, capacity and load reporting, reconnection with running-job report, graceful drain, job termination, panic isolation, HTTP health endpoint, hosted mode for LiveKit Cloud |
 | Audio | Subscribe to a participant, publish agent audio, Opus decode/encode and resampling (upstream helpers), paced playout with a bounded queue |
 | Turns | Silero VAD (model) and energy VAD, Smart Turn end-of-turn model, endpointing delays, STT-driven turns, manual turns, pluggable end-of-turn model interface |
-| Interruptions | Cancels LLM, TTS and tools, drops queued audio, records only what was played, no stale audio in the next turn |
+| Interruptions | Cancels LLM, TTS and tools, drops queued audio, records only what was played, no stale audio in the next turn. A sound without words only pauses the agent, which then resumes where it stopped |
 | Conversation | Role-based history, instructions, streaming replies, `Say`, `GenerateReply` |
 | Tools | Typed tools with generated JSON Schema, argument validation, timeouts, concurrent or sequential execution, model-visible errors, never retried |
 | Events | Agent and user state, transcripts, history items, speech, tool calls, errors, metrics |
@@ -286,6 +286,7 @@ integration tests and the Docker build. The end-to-end job is manual.
 | LiveKit Cloud managed agent deployment | Implemented (hosted-mode worker, health endpoint, `cmd/lkagent`), tested locally. **Not yet run on LiveKit Cloud**, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | Linux arm64 (Docker) | Image builds and the example worker registers with `livekit-server`. The image loads the Silero model at startup |
 | Linux amd64 (GitHub Actions, Ubuntu 26.04) | Unit tests with `-race`, including the Silero VAD and the Smart Turn model, and integration tests on every push |
+| False-interruption pause and resume | Verified by unit tests with a simulated output: nothing lost, nothing played twice. The hold followed by a confirmed interruption also ran over WebRTC in the integration tests. **Not verified:** the resume over WebRTC, and a live call |
 | Smart Turn end-of-turn model | Same model input and same probabilities as the reference Python code on 28 cases; a session waits on a synthesized unfinished sentence and answers a finished one at once; the pipeline test with live providers passed with it on 2026-11-14. **Not verified:** a live call with a person pausing mid-sentence. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) |
 
 ## Limitations and follow-up work
@@ -298,7 +299,6 @@ Not implemented in this version:
   is the alternative).
 - Agent handoffs, multi-agent workflows, task groups.
 - Telephony helpers (SIP, DTMF, voicemail detection), background audio.
-- False-interruption recovery (resuming a reply after a noise).
 - Word-level transcript alignment: history is cut per sentence and by played fraction.
 - Process isolation and prewarming of jobs.
 - More providers; noise cancellation.

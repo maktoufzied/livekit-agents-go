@@ -132,6 +132,14 @@ type TurnOptions struct {
 	// MinInterruptionWords additionally requires that many transcribed
 	// words before interrupting. Default 0 (disabled).
 	MinInterruptionWords int
+	// FalseInterruptionTimeout is how long the agent stays silent after a
+	// sound that interrupted it but was not followed by any transcript (a
+	// cough, a door, background voices). The speech is only paused when
+	// the VAD hears the sound, is cut for good as soon as words are
+	// transcribed, and resumes where it stopped when this much time passed
+	// after the sound without any. Default 2s; negative disables the pause,
+	// so that any sound the VAD takes for speech cuts the agent for good.
+	FalseInterruptionTimeout time.Duration
 }
 
 // ToolOptions configures tool execution.
@@ -252,6 +260,9 @@ func (o *SessionOptions) setDefaults() error {
 		o.Turn.MaxEndpointingDelay = o.Turn.MinEndpointingDelay
 	}
 	def(&o.Turn.MinInterruptionDuration, 500*time.Millisecond)
+	if o.Turn.FalseInterruptionTimeout == 0 {
+		o.Turn.FalseInterruptionTimeout = 2 * time.Second
+	}
 	if o.Turn.EndOfTurnThreshold <= 0 {
 		o.Turn.EndOfTurnThreshold = 0.5
 	}

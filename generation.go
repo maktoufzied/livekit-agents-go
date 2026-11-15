@@ -434,7 +434,23 @@ type pipeline struct {
 	stopped    bool
 	dropped    time.Duration
 	firstAudio bool
+
+	// Owned by the playout goroutine. pending holds the frames to write
+	// next, in order; recent the last frames written, to take them back
+	// when playout is put on hold.
+	pending []heldFrame
+	recent  []heldFrame
 }
+
+// heldFrame is a frame together with the sentence it belongs to.
+type heldFrame struct {
+	sg *seg
+	f  audio.Frame
+}
+
+// recentWindow bounds the frames kept to be played again after a hold. It
+// only needs to cover what an output keeps queued.
+const recentWindow = 2 * time.Second
 
 func newPipeline(s *Session, sp *SpeechHandle) *pipeline {
 	p := &pipeline{
@@ -534,7 +550,8 @@ func (p *pipeline) stop() {
 	<-p.playDone
 	dropped := p.s.out.Clear()
 	p.mu.Lock()
-	p.dropped = dropped
+	p.dropped += dropped
+	dropped = p.dropped
 	p.mu.Unlock()
 	if p.sp.Interrupted() {
 		p.s.emit(MetricsCollected{Metric: InterruptionMetrics{SpeechID: p.sp.id, Latency: time.Since(p.sp.interruptedAt), Dropped: dropped}})
@@ -738,6 +755,14 @@ func (p *pipeline) playout() {
 func (p *pipeline) playSegment(sg *seg) {
 	announced := false
 	for {
+		held, changed := p.sp.hold.state()
+		if held {
+			// Frames taken back by the hold are played before anything new.
+			if !p.waitReleased() || !p.flush() {
+				return
+			}
+			continue
+		}
 		var f audio.Frame
 		var ok bool
 		select {
@@ -745,6 +770,8 @@ func (p *pipeline) playSegment(sg *seg) {
 			if !ok {
 				return
 			}
+		case <-changed:
+			continue // put on hold while waiting for audio
 		case <-p.ctx.Done():
 			return
 		}
@@ -757,16 +784,125 @@ func (p *pipeline) playSegment(sg *seg) {
 			announced = true
 			p.onFirstFrame(sg)
 		}
-		if err := p.s.out.WriteFrame(p.ctx, f); err != nil {
-			if p.ctx.Err() == nil {
-				p.fail(SourceOutput, err)
-			}
+		if !p.deliver(sg, f) {
 			return
 		}
-		sg.mu.Lock()
-		sg.written += f.Duration()
-		sg.mu.Unlock()
 	}
+}
+
+// deliver writes a frame to the output, after any frame taken back by a
+// hold. It reports false when the speech is over.
+func (p *pipeline) deliver(sg *seg, f audio.Frame) bool {
+	p.pending = append(p.pending, heldFrame{sg, f})
+	return p.flush()
+}
+
+// flush writes the pending frames. It reports false when the speech is
+// over.
+func (p *pipeline) flush() bool {
+	for len(p.pending) > 0 {
+		if held, _ := p.sp.hold.state(); held {
+			if !p.waitReleased() {
+				return false
+			}
+			continue
+		}
+		it := p.pending[0]
+		ctx, cancel := context.WithCancel(p.ctx)
+		if !p.sp.hold.beginWrite(cancel) {
+			cancel()
+			continue // held since the check above
+		}
+		err := p.s.out.WriteFrame(ctx, it.f)
+		p.sp.hold.endWrite()
+		cancel()
+		if err != nil {
+			if p.ctx.Err() != nil {
+				return false
+			}
+			if held, _ := p.sp.hold.state(); held && errors.Is(err, context.Canceled) {
+				continue // the hold aborted the write: the frame stays pending
+			}
+			p.fail(SourceOutput, err)
+			return false
+		}
+		p.pending = p.pending[1:]
+		it.sg.mu.Lock()
+		it.sg.written += it.f.Duration()
+		it.sg.mu.Unlock()
+
+		p.recent = append(p.recent, it)
+		var kept time.Duration
+		for i := len(p.recent) - 1; i >= 0; i-- {
+			if kept += p.recent[i].f.Duration(); kept > recentWindow {
+				p.recent = append(p.recent[:0], p.recent[i+1:]...)
+				break
+			}
+		}
+	}
+	return true
+}
+
+// waitReleased is called by the playout goroutine when the speech is on
+// hold. It silences the output, takes back the frames that were queued but
+// not played so that they are played after the hold, and blocks until the
+// hold is released. It reports false when the speech is cancelled instead.
+func (p *pipeline) waitReleased() bool {
+	dropped := p.s.out.Clear()
+	var back []heldFrame
+	for len(p.recent) > 0 && dropped > 0 {
+		it := p.recent[len(p.recent)-1]
+		d := it.f.Duration()
+		if d > dropped {
+			// Partly played: only its unplayed end is played again.
+			samples := int(int64(dropped) * int64(it.f.SampleRate) / int64(time.Second))
+			if samples == 0 {
+				break
+			}
+			it.f.Data = it.f.Data[len(it.f.Data)-samples*it.f.Channels:]
+			d = it.f.Duration()
+			dropped = 0
+		} else {
+			dropped -= d
+		}
+		p.recent = p.recent[:len(p.recent)-1]
+		it.sg.mu.Lock()
+		it.sg.written -= d
+		it.sg.mu.Unlock()
+		back = append(back, it)
+	}
+	for i, j := 0, len(back)-1; i < j; i, j = i+1, j-1 {
+		back[i], back[j] = back[j], back[i]
+	}
+	p.pending = append(back, p.pending...)
+	if dropped > 0 {
+		// Audio that cannot be played again counts as not heard.
+		p.mu.Lock()
+		p.dropped += dropped
+		p.mu.Unlock()
+	}
+
+	p.mu.Lock()
+	speaking := p.firstAudio
+	p.mu.Unlock()
+	if speaking {
+		p.s.setAgentState(AgentListening)
+	}
+	for {
+		held, changed := p.sp.hold.state()
+		if !held {
+			break
+		}
+		select {
+		case <-changed:
+		case <-p.ctx.Done():
+			return false
+		}
+	}
+	if speaking {
+		p.s.setAgentState(AgentSpeaking)
+	}
+	return true
 }
 
 func (p *pipeline) onFirstFrame(sg *seg) {

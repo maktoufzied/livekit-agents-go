@@ -144,6 +144,25 @@ while a speech is running or queued, optionally only after `MinInterruptionWords
 transcribed words. Without a VAD, any transcribed word interrupts. A committed user turn
 also cancels speeches that are still pending for an older turn.
 
+A VAD cannot tell a cough from a word, so the sound alone only puts the running speech
+on hold. Words decide:
+
+```
+VAD: 500 ms of sound ─► hold: output silenced, queued audio taken back
+                          │
+                          ├─ a transcript arrives ──────────────► interruption (steps below)
+                          └─ silence for FalseInterruptionTimeout (2 s), no transcript
+                                                      ─► resume where it stopped,
+                                                         emit FalseInterruption
+```
+
+On hold, the playout goroutine clears the output itself (it stays the only writer),
+takes back the frames that were queued but not played, down to the sample, and plays
+them first when released. The model and the synthesis keep running against their
+bounded buffers. Nothing is said twice and nothing is lost. The agent state is
+`listening` during the hold. A negative `FalseInterruptionTimeout` disables the hold:
+the sound alone interrupts, as before.
+
 ```
 1. speech.Interrupt()      cancel the speech context
                            → LLM stream, TTS streams and interruptible tools stop
