@@ -57,6 +57,9 @@ type Session struct {
 
 	// turn is owned by the loop goroutine.
 	turn turnState
+	// turnAudio is the audio of the user turn for the TurnDetector; nil
+	// without one.
+	turnAudio *turnAudio
 }
 
 type turnState struct {
@@ -89,6 +92,9 @@ func NewSession(opts SessionOptions) (*Session, error) {
 		s.specs = append(s.specs, t.Spec())
 	}
 	s.bus = newEventBus(opts.Buffers.Events, s.log)
+	if opts.TurnDetector != nil {
+		s.turnAudio = newTurnAudio()
+	}
 	return s, nil
 }
 
@@ -347,6 +353,7 @@ func (s *Session) ClearUserTurn() {
 		s.post(func() {
 			s.turn.finals, s.turn.interim = nil, ""
 			s.turn.eouGen++
+			s.resetTurnAudio()
 		})
 	}
 }
@@ -545,6 +552,11 @@ func (s *Session) inputLoop() {
 			}
 			return
 		}
+		var pos int64 // where the audio stands, for events of this frame
+		if s.turnAudio != nil {
+			s.turnAudio.write(f)
+			pos = s.turnAudio.position()
+		}
 		if det != nil {
 			events, err := det.Process(f)
 			if err != nil {
@@ -552,7 +564,7 @@ func (s *Session) inputLoop() {
 			}
 			for _, ev := range events {
 				ev := ev
-				s.post(func() { s.onVAD(ev) })
+				s.post(func() { s.onVAD(ev, pos) })
 			}
 		}
 		// Bounded hand-off: never block the audio source on a slow STT
@@ -661,10 +673,15 @@ func (s *Session) runSTTStream() (gotEvent bool, err error) {
 // ---------------------------------------------------------------------------
 // Turn detection and interruptions (loop goroutine only)
 
-func (s *Session) onVAD(ev vad.Event) {
+// onVAD handles a VAD event raised when the input stood at position pos.
+func (s *Session) onVAD(ev vad.Event, pos int64) {
 	t := &s.turn
 	switch ev.Type {
 	case vad.SpeechStart:
+		s.markTurnAudio(pos, ev.SpeechDuration)
+		if s.turnAudio != nil {
+			s.turnAudio.resumed()
+		}
 		t.userSpeaking = true
 		t.eouGen++ // the user resumed: cancel any pending end of turn
 		s.setUserState(UserSpeaking)
@@ -685,6 +702,9 @@ func (s *Session) onVAD(ev vad.Event) {
 			s.bargeIn()
 		})
 	case vad.SpeechEnd:
+		if s.turnAudio != nil {
+			s.turnAudio.stopped(pos, ev.SilenceDuration)
+		}
 		t.userSpeaking = false
 		t.speechEndedAt = time.Now()
 		t.bargeGen++
@@ -702,6 +722,7 @@ func (s *Session) onSTT(ev stt.Event) {
 	switch ev.Type {
 	case stt.SpeechStarted:
 		if !hasVAD {
+			s.markTurnAudio(s.turnAudioPosition(), 0)
 			t.userSpeaking = true
 			t.eouGen++
 			s.setUserState(UserSpeaking)
@@ -713,6 +734,10 @@ func (s *Session) onSTT(ev stt.Event) {
 		t.interim = ev.Text
 		s.emit(UserTranscript{Text: ev.Text, Language: ev.Language})
 		if !hasVAD {
+			if !t.userSpeaking {
+				// The words were said before they were transcribed.
+				s.markTurnAudio(s.turnAudioPosition(), sttStartLag)
+			}
 			t.userSpeaking = true
 			t.eouGen++
 			s.setUserState(UserSpeaking)
@@ -781,6 +806,40 @@ func (s *Session) bargeIn() {
 	}
 }
 
+// sttStartLag is the assumed delay between the start of speech and the
+// first interim transcript, used to place the turn start without a VAD.
+const sttStartLag = 500 * time.Millisecond
+
+// markTurnAudio notes that the user started speaking ago before the input
+// stood at position at. The
+// first speech of a turn sets the start of the audio given to the
+// TurnDetector. Speech that follows an unanswered sound with no transcript
+// (a noise, or a turn that was cleared) starts over.
+func (s *Session) markTurnAudio(at int64, ago time.Duration) {
+	if s.turnAudio == nil {
+		return
+	}
+	t := &s.turn
+	stale := len(t.finals) == 0 && t.interim == "" &&
+		time.Since(t.speechEndedAt) > s.opts.Turn.MaxEndpointingDelay
+	s.turnAudio.mark(at, ago, stale)
+}
+
+// turnAudioPosition is the current input position, for speech reported by
+// the STT provider, which carries no position.
+func (s *Session) turnAudioPosition() int64 {
+	if s.turnAudio == nil {
+		return 0
+	}
+	return s.turnAudio.position()
+}
+
+func (s *Session) resetTurnAudio() {
+	if s.turnAudio != nil {
+		s.turnAudio.reset()
+	}
+}
+
 // scheduleEOU (re)arms the end-of-turn timer.
 func (s *Session) scheduleEOU(d time.Duration) {
 	if s.opts.Turn.Mode == TurnManual {
@@ -795,37 +854,56 @@ func (s *Session) scheduleEOU(d time.Duration) {
 func (s *Session) armEOU(d time.Duration) {
 	t := &s.turn
 	gen := t.eouGen
-	s.after(d, func() {
+	ask := s.opts.TurnDetector != nil && !t.eouExtended && len(t.finals) > 0
+
+	// These are only touched by the closures below, which run on the loop.
+	var (
+		waiting = ask // the end-of-turn model has not answered yet
+		elapsed bool  // the delay is over
+		prob    float64
+	)
+	decide := func() {
 		if gen != t.eouGen || t.userSpeaking {
 			return
 		}
-		if s.opts.TurnDetector == nil || t.eouExtended || len(t.finals) == 0 {
-			s.commitUserTurn()
+		if ask && prob < s.opts.Turn.EndOfTurnThreshold {
+			t.eouExtended = true
+			s.armEOU(s.opts.Turn.MaxEndpointingDelay - s.opts.Turn.MinEndpointingDelay)
 			return
 		}
-		// Ask the end-of-turn model off the loop; it must not stall audio.
-		history := append(s.conv.Messages(), llm.Message{Role: llm.RoleUser, Content: strings.Join(t.finals, " ")})
+		s.commitUserTurn()
+	}
+
+	if ask {
+		// The model runs during the delay, so that its answer costs no time
+		// when the user is done, and off the loop: it must not stall audio.
+		in := TurnInput{
+			History: append(s.conv.Messages(), llm.Message{Role: llm.RoleUser, Content: strings.Join(t.finals, " ")}),
+			Audio:   s.turnAudio.snapshot(),
+		}
 		// Tracked so that Close waits for the call to return. Adding to the
 		// WaitGroup is safe here: the loop goroutine itself is tracked.
 		s.goRun(func() {
 			ctx, cancel := context.WithTimeout(s.ctx, s.opts.Timeouts.TurnDetector)
 			defer cancel()
-			p, err := s.opts.TurnDetector.EndOfTurnProbability(ctx, history)
+			p, err := s.opts.TurnDetector.EndOfTurnProbability(ctx, in)
 			if err != nil {
 				s.reportError(SourceTurnDetector, err, true)
+				p = 1 // without an answer the silence decides
 			}
 			s.post(func() {
-				if gen != t.eouGen || t.userSpeaking {
-					return
+				prob, waiting = p, false
+				if elapsed {
+					decide()
 				}
-				if err == nil && p < s.opts.Turn.EndOfTurnThreshold {
-					t.eouExtended = true
-					s.armEOU(s.opts.Turn.MaxEndpointingDelay - s.opts.Turn.MinEndpointingDelay)
-					return
-				}
-				s.commitUserTurn()
 			})
 		})
+	}
+	s.after(d, func() {
+		elapsed = true
+		if !waiting {
+			decide()
+		}
 	})
 }
 
@@ -837,6 +915,7 @@ func (s *Session) commitUserTurn() {
 	t.finals, t.interim = nil, ""
 	t.eouGen++
 	t.wantInterrupt = false
+	s.resetTurnAudio()
 	if text == "" {
 		return
 	}

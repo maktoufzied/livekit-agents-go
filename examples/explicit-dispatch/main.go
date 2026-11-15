@@ -49,14 +49,19 @@ func entrypoint(ctx context.Context, job *agents.Job) error {
 	if err != nil {
 		return err
 	}
+	endOfTurn, err := setup.TurnDetector(job.Logger())
+	if err != nil {
+		return err
+	}
 	session, err := agents.NewSession(agents.SessionOptions{
 		Agent: &agents.Agent{
 			Instructions: "You are a support agent on a phone-like call with a customer named " + meta.Customer +
 				". Be concise and helpful; your answers are spoken aloud.",
 		},
 		STT: recognizer, LLM: model, TTS: voice,
-		VAD:    detector,
-		Logger: job.Logger(),
+		VAD:          detector,
+		TurnDetector: endOfTurn,
+		Logger:       job.Logger(),
 	})
 	if err != nil {
 		return err
@@ -72,9 +77,13 @@ func main() {
 	logger := setup.Logger()
 	slog.SetDefault(logger)
 
-	// Load the voice activity model before the first job needs it.
+	// Load the models before the first job needs them.
 	if _, err := setup.VAD(logger); err != nil {
 		logger.Error("cannot load the voice activity detector", "error", err)
+		os.Exit(1)
+	}
+	if _, err := setup.TurnDetector(logger); err != nil {
+		logger.Error("cannot load the end-of-turn model", "error", err)
 		os.Exit(1)
 	}
 	worker, err := agents.NewWorker(agents.WorkerOptions{

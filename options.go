@@ -90,13 +90,26 @@ func (m TurnMode) String() string {
 }
 
 // TurnDetector is an optional end-of-turn model. When set, the session asks
-// it once the minimum endpointing delay elapsed; a probability below
-// TurnOptions.EndOfTurnThreshold postpones the turn end up to
-// MaxEndpointingDelay. The SDK ships no implementation.
+// it when the user stops speaking, while the minimum endpointing delay runs;
+// a probability below TurnOptions.EndOfTurnThreshold postpones the turn end
+// up to MaxEndpointingDelay. turn/smartturn is an implementation that listens to
+// the audio.
 type TurnDetector interface {
 	// EndOfTurnProbability returns the probability in [0, 1] that the user
-	// finished speaking. history ends with the pending user message.
-	EndOfTurnProbability(ctx context.Context, history []llm.Message) (float64, error)
+	// finished speaking.
+	EndOfTurnProbability(ctx context.Context, in TurnInput) (float64, error)
+}
+
+// TurnInput is what a TurnDetector decides on. A detector uses the part it
+// understands: the words, the sound, or both.
+type TurnInput struct {
+	// History is the conversation, ending with the pending user message.
+	History []llm.Message
+	// Audio is what the user said in the current turn, in the format of the
+	// audio input. With a VAD it starts 200 ms before the speech and ends
+	// 200 ms after it; without one it runs up to now. It holds at most the
+	// last 8 seconds, and is empty when the session has no audio input.
+	Audio audio.Frame
 }
 
 // TurnOptions configures turn detection and interruptions.

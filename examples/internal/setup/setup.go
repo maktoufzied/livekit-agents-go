@@ -17,6 +17,7 @@ import (
 	"github.com/maktoufzied/livekit-agents-go/providers/openai"
 	"github.com/maktoufzied/livekit-agents-go/stt"
 	"github.com/maktoufzied/livekit-agents-go/tts"
+	"github.com/maktoufzied/livekit-agents-go/turn/smartturn"
 	"github.com/maktoufzied/livekit-agents-go/vad"
 	"github.com/maktoufzied/livekit-agents-go/vad/silero"
 )
@@ -113,4 +114,50 @@ func VAD(logger *slog.Logger) (vad.VAD, error) {
 		}
 	})
 	return sharedVAD, vadErr
+}
+
+var (
+	turnOnce   sync.Once
+	sharedTurn agents.TurnDetector
+	turnErr    error
+)
+
+// TurnDetector returns the end-of-turn model shared by every session of the
+// process, or nil for none. With it the agent waits when the user pauses in
+// the middle of a sentence. The TURN_DETECTOR environment variable selects
+// it:
+//
+//   - smartturn: the Smart Turn model. Needs the ONNX Runtime library, see
+//     scripts/install-onnxruntime.sh.
+//   - off: none, a turn ends after a fixed silence.
+//   - unset: Smart Turn when ONNX Runtime is installed, none otherwise. With
+//     AGENT_FAKE_PROVIDERS=1 always none: the test sounds are not speech.
+//
+// The model is loaded once: call TurnDetector from the entrypoint of each job.
+func TurnDetector(logger *slog.Logger) (agents.TurnDetector, error) {
+	turnOnce.Do(func() {
+		choice := os.Getenv("TURN_DETECTOR")
+		if choice == "" && os.Getenv("AGENT_FAKE_PROVIDERS") == "1" {
+			choice = "off"
+		}
+		switch choice {
+		case "off":
+		case "smartturn", "":
+			detector, err := smartturn.New(smartturn.Options{})
+			switch {
+			case err == nil:
+				sharedTurn = detector
+			case choice == "":
+				logger.Warn("Smart Turn unavailable, turns end after a fixed silence", "error", err)
+			default:
+				turnErr = err
+			}
+		default:
+			turnErr = fmt.Errorf("TURN_DETECTOR=%q: want smartturn or off", choice)
+		}
+		if turnErr == nil {
+			logger.Info("end-of-turn model", "enabled", sharedTurn != nil)
+		}
+	})
+	return sharedTurn, turnErr
 }

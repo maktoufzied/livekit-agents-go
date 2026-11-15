@@ -293,20 +293,6 @@ func TestClose(t *testing.T) {
 	}
 }
 
-func TestLibraryCandidates(t *testing.T) {
-	t.Setenv(LibraryEnv, "/from/env/libonnxruntime.so")
-	if got := libraryCandidates("/explicit.so"); len(got) != 1 || got[0] != "/explicit.so" {
-		t.Errorf("explicit path: %v", got)
-	}
-	if got := libraryCandidates(""); len(got) != 1 || got[0] != "/from/env/libonnxruntime.so" {
-		t.Errorf("environment: %v", got)
-	}
-	t.Setenv(LibraryEnv, "")
-	if got := libraryCandidates(""); len(got) == 0 {
-		t.Error("no default candidate")
-	}
-}
-
 func BenchmarkProcess(b *testing.B) {
 	v := load(b, Options{})
 	d, err := v.NewDetector()

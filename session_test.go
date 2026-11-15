@@ -295,7 +295,7 @@ func TestDisableInterruptions(t *testing.T) {
 
 func TestVADEndpointingAndTurnDetector(t *testing.T) {
 	var asked atomic.Int32
-	det := detectorFunc(func(context.Context, []llm.Message) (float64, error) {
+	det := detectorFunc(func(context.Context, agents.TurnInput) (float64, error) {
 		asked.Add(1)
 		return 0.1, nil // "the user is not done"
 	})
@@ -325,10 +325,63 @@ func TestVADEndpointingAndTurnDetector(t *testing.T) {
 	}
 }
 
-type detectorFunc func(context.Context, []llm.Message) (float64, error)
+// The turn detector hears what the user said in this turn: not the silence
+// before it, and not the previous turn.
+func TestTurnDetectorHearsTheTurn(t *testing.T) {
+	inputs := make(chan agents.TurnInput, 4)
+	det := detectorFunc(func(_ context.Context, in agents.TurnInput) (float64, error) {
+		inputs <- in
+		return 0.9, nil
+	})
+	h := newHarness(t, []agentstest.Response{agentstest.Text("One."), agentstest.Text("Two.")}, withVAD(), withOpts(func(o *agents.SessionOptions) {
+		o.TurnDetector = det
+	})).start()
 
-func (f detectorFunc) EndOfTurnProbability(ctx context.Context, h []llm.Message) (float64, error) {
-	return f(ctx, h)
+	say := func(tone time.Duration, text string) agents.TurnInput {
+		t.Helper()
+		h.in.PushTone(tone)
+		waitFor(t, "user speaking", func() bool { return h.s.UserState() == agents.UserSpeaking })
+		h.in.PushSilence(300 * time.Millisecond)
+		waitFor(t, "user listening", func() bool { return h.s.UserState() == agents.UserListening })
+		h.stt.Final(text)
+		select {
+		case in := <-inputs:
+			return in
+		case <-time.After(5 * time.Second):
+			t.Fatal("turn detector not asked")
+			return agents.TurnInput{}
+		}
+	}
+	check := func(in agents.TurnInput, tone time.Duration, text string) {
+		t.Helper()
+		if last := in.History[len(in.History)-1]; last.Role != llm.RoleUser || last.Content != text {
+			t.Fatalf("history ends with %+v, want the pending user message %q", last, text)
+		}
+		if in.Audio.SampleRate != 16000 || in.Audio.Channels != 1 {
+			t.Fatalf("audio format = %v", in.Audio.Format())
+		}
+		// The tone, 200 ms before it and 200 ms after it.
+		got := in.Audio.Duration()
+		if lo, hi := tone+300*time.Millisecond, tone+500*time.Millisecond; got < lo || got > hi {
+			t.Fatalf("turn audio = %v, want between %v and %v", got, lo, hi)
+		}
+		if audio.RMS(in.Audio) == 0 {
+			t.Fatal("turn audio is silent")
+		}
+	}
+
+	h.in.PushSilence(2 * time.Second)
+	check(say(200*time.Millisecond, "first"), 200*time.Millisecond, "first")
+	h.waitSpeeches(1)
+	h.in.PushSilence(time.Second)
+	check(say(400*time.Millisecond, "second"), 400*time.Millisecond, "second")
+	h.waitSpeeches(2)
+}
+
+type detectorFunc func(context.Context, agents.TurnInput) (float64, error)
+
+func (f detectorFunc) EndOfTurnProbability(ctx context.Context, in agents.TurnInput) (float64, error) {
+	return f(ctx, in)
 }
 
 func TestManualTurns(t *testing.T) {

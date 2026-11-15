@@ -38,7 +38,14 @@ https://github.com/snakers4/silero-vad. It uses github.com/yalue/onnxruntime_go
 MIT License, https://github.com/microsoft/onnxruntime), which is not
 included in this repository.
 
+The package turn/smartturn embeds the Smart Turn model, version 3.2, CPU
+variant (smart-turn-v3.2-cpu.onnx), Copyright (c) 2024-2025 Daily, BSD
+2-Clause License, https://github.com/pipecat-ai/smart-turn. The license text
+is in turn/smartturn/LICENSE-smart-turn. It runs on ONNX Runtime like
+vad/silero.
+
 Test audio in vad/silero/testdata: apollo11_16k.pcm is converted from the NASA
 recording "That's one small step for (a) man" (Apollo 11, 1969), courtesy of
 NASA, public domain, https://www.nasa.gov/wp-content/uploads/2015/01/590331main_ringtone_smallStep.mp3.
-speech_16k.pcm was synthesized for this project.
+speech_16k.pcm was synthesized for this project, as were unfinished_16k.pcm
+and finished_16k.pcm in turn/smartturn/testdata.

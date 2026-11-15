@@ -102,6 +102,7 @@ This exact program is [`examples/quickstart`](examples/quickstart). More:
 | `agents` (root) | `Worker`, `Job`, `Session`, `Agent`, events, metrics, errors | no |
 | `llm`, `stt`, `tts`, `vad` | Provider interfaces, conversation, tools, energy VAD | no |
 | `vad/silero` | Silero VAD model on ONNX Runtime | **yes**, library loaded at run time |
+| `turn/smartturn` | Smart Turn end-of-turn model on ONNX Runtime | **yes**, library loaded at run time |
 | `audio` | PCM frame type and helpers | no |
 | `roomio` | LiveKit room audio in/out, agent state and transcripts | **yes** |
 | `providers/deepgram` | Streaming STT (WebSocket), TTS (REST) | no |
@@ -147,6 +148,42 @@ ONNX Runtime is not needed to build. Install the pinned version with
 `ONNXRUNTIME_LIB` at an existing library. The examples use Silero when the library is
 found and fall back to the energy detector with a warning; `VAD=silero` or `VAD=energy`
 forces one. On an Apple M4 the model takes about 0.06 ms per 20 ms frame.
+
+### End-of-turn model
+
+Without a model, a turn ends after a fixed silence, so the agent answers when the user
+only pauses to think. `turn/smartturn` listens to the user's last 8 seconds and says
+whether the sentence sounds finished.
+
+```
+user stops ─► VAD: silence ─► Smart Turn ─┬─ finished ────► reply after 500 ms
+                                          └─ unfinished ──► wait up to 3 s for more
+```
+
+```go
+endOfTurn, err := smartturn.New(smartturn.Options{}) // once per process
+if err != nil {
+	return err // errors.Is(err, smartturn.ErrRuntimeUnavailable): library missing
+}
+session, err := agents.NewSession(agents.SessionOptions{
+	VAD:          detector,
+	TurnDetector: endOfTurn,
+	// ...
+})
+```
+
+| Item | Value |
+|---|---|
+| Model | [Smart Turn](https://github.com/pipecat-ai/smart-turn) v3.2 by the Pipecat project, BSD 2-Clause, 8.7 MB, embedded |
+| Languages | 23, see the model page |
+| Needs | cgo and the ONNX Runtime library, like `vad/silero` |
+| Cost | About 60 ms of one core per turn on an Apple M4. It runs during the endpointing delay, so a finished turn is not delayed |
+| Delays | `TurnOptions.MinEndpointingDelay` (500 ms), `MaxEndpointingDelay` (3 s), `EndOfTurnThreshold` (0.5) |
+
+The examples use it when ONNX Runtime is found; `TURN_DETECTOR=off` disables it. Any
+other model can be plugged in through the `agents.TurnDetector` interface, which
+receives the transcript and the audio of the turn. LiveKit's own turn-detector model is
+not used: its license allows it only with LiveKit's Agents framework.
 
 ## Run an example
 
@@ -203,7 +240,7 @@ the server dispatches it to every new room.
 |---|---|
 | Worker | Registration, job requests, accept/reject, assignment, capacity and load reporting, reconnection with running-job report, graceful drain, job termination, panic isolation, HTTP health endpoint, hosted mode for LiveKit Cloud |
 | Audio | Subscribe to a participant, publish agent audio, Opus decode/encode and resampling (upstream helpers), paced playout with a bounded queue |
-| Turns | Silero VAD (model) and energy VAD, endpointing delays, STT-driven turns, manual turns, pluggable end-of-turn model interface |
+| Turns | Silero VAD (model) and energy VAD, Smart Turn end-of-turn model, endpointing delays, STT-driven turns, manual turns, pluggable end-of-turn model interface |
 | Interruptions | Cancels LLM, TTS and tools, drops queued audio, records only what was played, no stale audio in the next turn |
 | Conversation | Role-based history, instructions, streaming replies, `Say`, `GenerateReply` |
 | Tools | Typed tools with generated JSON Schema, argument validation, timeouts, concurrent or sequential execution, model-visible errors, never retried |
@@ -248,7 +285,8 @@ integration tests and the Docker build. The end-to-end job is manual.
 | LiveKit Cloud connectivity | Verified on 2026-11-13: the explicit-dispatch vertical slice (fake speech providers) passed against a Cloud project, server 1.13.10. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | LiveKit Cloud managed agent deployment | Implemented (hosted-mode worker, health endpoint, `cmd/lkagent`), tested locally. **Not yet run on LiveKit Cloud**, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | Linux arm64 (Docker) | Image builds and the example worker registers with `livekit-server`. The image loads the Silero model at startup |
-| Linux amd64 (GitHub Actions, Ubuntu 26.04) | Unit tests with `-race`, including the Silero VAD, and integration tests on every push |
+| Linux amd64 (GitHub Actions, Ubuntu 26.04) | Unit tests with `-race`, including the Silero VAD and the Smart Turn model, and integration tests on every push |
+| Smart Turn end-of-turn model | Same model input and same probabilities as the reference Python code on 28 cases; a session waits on a synthesized unfinished sentence and answers a finished one at once; the pipeline test with live providers passed with it on 2026-11-14. **Not verified:** a live call with a person pausing mid-sentence. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) |
 
 ## Limitations and follow-up work
 
@@ -256,7 +294,8 @@ Not implemented in this version:
 
 - Speech-to-speech realtime models (the `realtime` interfaces exist, nothing uses them).
 - Video and vision input, avatars.
-- Model-based turn prediction (the `TurnDetector` interface exists, no model ships).
+- LiveKit's turn-detector model (its license excludes other frameworks; `turn/smartturn`
+  is the alternative).
 - Agent handoffs, multi-agent workflows, task groups.
 - Telephony helpers (SIP, DTMF, voicemail detection), background audio.
 - False-interruption recovery (resuming a reply after a noise).

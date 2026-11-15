@@ -23,14 +23,12 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
 
 	ort "github.com/yalue/onnxruntime_go"
 
+	"github.com/maktoufzied/livekit-agents-go/internal/onnxrt"
 	"github.com/maktoufzied/livekit-agents-go/vad"
 )
 
@@ -39,12 +37,12 @@ var embeddedModel []byte
 
 // LibraryEnv is the environment variable naming the ONNX Runtime shared
 // library, used when Options.LibraryPath is empty.
-const LibraryEnv = "ONNXRUNTIME_LIB"
+const LibraryEnv = onnxrt.LibraryEnv
 
 var (
 	// ErrRuntimeUnavailable reports that the ONNX Runtime shared library
 	// could not be loaded.
-	ErrRuntimeUnavailable = errors.New("silero: ONNX Runtime unavailable")
+	ErrRuntimeUnavailable = onnxrt.ErrUnavailable
 	// ErrClosed is returned when a closed VAD or detector is used.
 	ErrClosed = errors.New("silero: closed")
 )
@@ -126,8 +124,8 @@ func New(opts Options) (*VAD, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := loadRuntime(opts.LibraryPath); err != nil {
-		return nil, err
+	if err := onnxrt.Load(opts.LibraryPath); err != nil {
+		return nil, fmt.Errorf("silero: %w", err)
 	}
 
 	so, err := ort.NewSessionOptions()
@@ -267,74 +265,4 @@ func (m *onnxModel) close() error {
 		errs = append(errs, m.stateN.Destroy())
 	}
 	return errors.Join(errs...)
-}
-
-// ---------------------------------------------------------------------------
-// ONNX Runtime loading
-
-var runtimeMu sync.Mutex
-
-// loadRuntime initializes the process-wide ONNX Runtime environment once. A
-// failed attempt can be retried with another path.
-func loadRuntime(explicit string) error {
-	runtimeMu.Lock()
-	defer runtimeMu.Unlock()
-	if ort.IsInitialized() {
-		return nil // by an earlier New, or by the application itself
-	}
-
-	candidates := libraryCandidates(explicit)
-	var firstErr error
-	for _, path := range candidates {
-		ort.SetSharedLibraryPath(path)
-		err := ort.InitializeEnvironment()
-		if err == nil {
-			return nil
-		}
-		if firstErr == nil {
-			firstErr = fmt.Errorf("%s: %w", path, err)
-		}
-	}
-	return fmt.Errorf("%w: %v (set Options.LibraryPath or %s; see scripts/install-onnxruntime.sh)",
-		ErrRuntimeUnavailable, firstErr, LibraryEnv)
-}
-
-// libraryCandidates lists the libraries to try, most specific first. An
-// explicit path or the environment variable is the only candidate: a wrong
-// value should fail loudly rather than fall back to another library.
-func libraryCandidates(explicit string) []string {
-	if explicit != "" {
-		return []string{explicit}
-	}
-	if env := os.Getenv(LibraryEnv); env != "" {
-		return []string{env}
-	}
-
-	var name string
-	var dirs []string
-	switch runtime.GOOS {
-	case "darwin":
-		name = "libonnxruntime.dylib"
-		dirs = []string{"/opt/homebrew/lib", "/usr/local/lib"}
-	case "windows":
-		return []string{"onnxruntime.dll"}
-	default:
-		name = "libonnxruntime.so"
-		dirs = []string{"/usr/local/lib", "/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu"}
-	}
-
-	var out []string
-	for _, dir := range dirs {
-		path := filepath.Join(dir, name)
-		if _, err := os.Stat(path); err == nil {
-			out = append(out, path)
-			continue
-		}
-		// Distribution packages ship only the versioned file.
-		if matches, _ := filepath.Glob(path + ".*"); len(matches) > 0 {
-			out = append(out, matches[len(matches)-1])
-		}
-	}
-	// Last, the bare name: the system loader searches its own paths.
-	return append(out, name)
 }

@@ -75,7 +75,7 @@ identical behaviour to upstream.
 | STT → LLM → TTS pipeline | Yes | Yes |
 | Speech-to-speech realtime models | Yes | No (interfaces only) |
 | VAD | Silero (model) | Silero (same model file, see below) and an energy detector |
-| Turn detection | VAD, STT, realtime, turn-detector model | VAD, STT, manual; interface for a model |
+| Turn detection | VAD, STT, realtime, LiveKit turn-detector model (text) | VAD, STT, manual, Smart Turn model (audio, see below) |
 | Interruptions | Yes | Yes |
 | Adaptive / false-interruption handling | Yes | No |
 | History truncation on interruption | Aligned transcripts when the TTS provides them | Per sentence plus played fraction |
@@ -150,6 +150,68 @@ The first two rows are kept as a test, `TestMatchesUpstreamPlugin`, with referen
 from `vad/silero/testdata/reference.py`. The other rows were one-off runs. Not checked:
 a recording from a noisy room with several speakers or music.
 
+## End-of-turn model
+
+Upstream uses `livekit-plugins-turn-detector`, a small language model that reads the
+transcript. Its weights are under the LiveKit Model License, which allows them only
+"together with the LiveKit Agents framework" and not "with any other frameworks". This
+SDK is another framework, so it does not load that model.
+
+`turn/smartturn` runs [Smart Turn](https://github.com/pipecat-ai/smart-turn) v3.2
+instead (Pipecat project, BSD 2-Clause). The two models are not equivalent:
+
+| Item | LiveKit turn detector | Smart Turn (this SDK) |
+|---|---|---|
+| Input | Transcript of the last turns | Audio of the current turn, last 8 s |
+| Sees | Words and grammar | Tone, pace and words as they sound |
+| Depends on the STT | Yes | No |
+| Languages | English model, multilingual model | 23 |
+| Size | 66 MB (English), 396 MB (multilingual) | 8.7 MB |
+
+`turn/smartturn` follows the reference inference code of the Smart Turn repository
+(`inference.py` at commit `4e12f2bb`): Whisper log-mel features over the last 8 seconds
+with zero-mean, unit-variance input, then the ONNX model. The feature extraction is
+written in Go.
+
+Compared with that Python code (ONNX Runtime 1.32.0, `transformers` 4.48.2) on
+2026-11-14, on 28 cases: four clips (two synthesized sentences of the Smart Turn
+documentation, the synthesized sentence of the VAD tests and the Apollo 11 recording),
+cut at different points.
+
+| What | Result |
+|---|---|
+| Model input (80 × 800 values) | Largest difference 0.000006 |
+| Probability, unquantized model (`smart-turn-v3.2-gpu.onnx`) | 28 of 28 equal, largest difference 0.0000015 |
+| Probability, embedded model (`smart-turn-v3.2-cpu.onnx`, quantized to 8 bits) | 24 of 28 equal; the other 4 differ by 0.01, 0.03, 0.08 and 0.21 |
+| Decisions at threshold 0.5, embedded model | 28 of 28 the same (one case sits exactly on 0.5 here and at 0.53 in Python) |
+
+The embedded model is unstable by itself: the Python code moves by the same amounts
+(up to 0.2 on the same cases) when random noise of 0.000005 is added to its own input.
+The differences are that effect, not a difference in the computation, which the
+unquantized model shows. The unquantized model is 32 MB and is not embedded; pass it as
+`Options.Model` to use it.
+
+What the model answers, and what the session does with it:
+
+| Audio | Probability | Session (Silero VAD, delays 200 ms and 2 s) |
+|---|---|---|
+| "I can't seem to, um..." | 0.005, also with 1 s of silence after it | Replies after 2.0 s, the maximum delay |
+| "I can't seem to, um, find the return label." | 0.98, also with 1 s of silence after it | Replies after 0.2 s, the minimum delay |
+| A sentence cut in the middle of a word, no silence after the cut | 0.02 to 0.11 | — |
+| The same cuts followed by silence | 0.9 and above once the silence reaches 0.2 s (two cuts) or 1 s (one cut) | — |
+
+The last row is why the session gives the model the turn up to 200 ms after the end of
+the speech and not the silence that follows: a long silence makes speech that stops
+abruptly sound finished. A natural hesitation stays low whatever the silence.
+
+The first, third and fourth rows of the comparison are kept as tests
+(`TestFeaturesMatchReference`, `TestMatchesReference`); the second runs when
+`SMARTTURN_FP32_MODEL` points at the unquantized model. The session behaviour is
+`TestSessionWaitsForUnfinishedSentence`. References come from
+`turn/smartturn/testdata/reference.py`. Not checked: recordings of real people
+hesitating (the two sentences are synthesized voices), other languages, a live call,
+and the embedded model on x86 before the first CI run.
+
 ## Provider notes
 
 All three providers were written against the vendors' documentation as of 2026-11-12.
@@ -169,7 +231,7 @@ Their unit tests use local servers that replay documented message shapes. The op
 | Milestone | Content |
 |---|---|
 | 0.2 Hardening | First managed deployment on LiveKit Cloud with `lkagent`. More real-voice testing (noise, echo, several languages). |
-| 0.3 Turn quality | Silero VAD: done. Turn-detector model behind `TurnDetector`. False-interruption recovery. Preemptive generation. |
+| 0.3 Turn quality | Silero VAD: done. End-of-turn model (Smart Turn): done. False-interruption recovery. Preemptive generation. |
 | 0.4 Realtime | Wire `realtime.Model` into the session, with one provider. |
 | 0.5 Audio | Streaming-input TTS with aligned transcripts. Evaluate a cgo-free Opus path with `pion/opus`. |
 | Later | Handoffs and tasks, text input, telephony helpers, video, more providers, OpenTelemetry export, newer `protocol` messages (`GoAway`, join timing, job tokens). |

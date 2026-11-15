@@ -41,7 +41,8 @@ deps-macos:
 deps-debian:
 	sudo apt-get install -y pkg-config libopus-dev libopusfile-dev libsoxr-dev
 
-# ONNX Runtime shared library for the Silero VAD (vad/silero). Without it the
-# Silero tests are skipped and the examples fall back to the energy detector.
+# ONNX Runtime shared library for the speech models (vad/silero,
+# turn/smartturn). Without it their tests are skipped and the examples fall
+# back to the energy detector and to fixed-silence turns.
 deps-onnxruntime:
 	sudo ./scripts/install-onnxruntime.sh /usr/local/lib

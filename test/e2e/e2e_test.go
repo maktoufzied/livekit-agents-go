@@ -28,6 +28,7 @@ import (
 	"github.com/maktoufzied/livekit-agents-go/providers/anthropic"
 	"github.com/maktoufzied/livekit-agents-go/providers/deepgram"
 	"github.com/maktoufzied/livekit-agents-go/providers/openai"
+	"github.com/maktoufzied/livekit-agents-go/turn/smartturn"
 	"github.com/maktoufzied/livekit-agents-go/vad"
 	"github.com/maktoufzied/livekit-agents-go/vad/silero"
 )
@@ -48,6 +49,36 @@ func detector(t *testing.T) vad.VAD {
 	t.Cleanup(func() { v.Close() })
 	t.Log("VAD: silero")
 	return v
+}
+
+// turnDetector returns the Smart Turn model when ONNX Runtime is installed,
+// and nil otherwise. It logs what the model heard and answered.
+func turnDetector(t *testing.T) agents.TurnDetector {
+	t.Helper()
+	d, err := smartturn.New(smartturn.Options{})
+	if errors.Is(err, smartturn.ErrRuntimeUnavailable) {
+		t.Log("turn detector: none")
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	t.Log("turn detector: smartturn")
+	return loggingDetector{t: t, next: d}
+}
+
+type loggingDetector struct {
+	t    *testing.T
+	next agents.TurnDetector
+}
+
+func (l loggingDetector) EndOfTurnProbability(ctx context.Context, in agents.TurnInput) (float64, error) {
+	start := time.Now()
+	p, err := l.next.EndOfTurnProbability(ctx, in)
+	l.t.Logf("turn detector: %v of audio, end-of-turn probability %.3f in %v (err=%v)",
+		in.Audio.Duration().Round(10*time.Millisecond), p, time.Since(start).Round(time.Millisecond), err)
+	return p, err
 }
 
 func TestRealProvidersPipeline(t *testing.T) {
@@ -107,7 +138,8 @@ func TestRealProvidersPipeline(t *testing.T) {
 	session, err := agents.NewSession(agents.SessionOptions{
 		Agent: &agents.Agent{Instructions: "You are a concise voice assistant. Answer in one short sentence."},
 		STT:   recognizer, LLM: model, TTS: voice,
-		VAD: detector(t),
+		VAD:          detector(t),
+		TurnDetector: turnDetector(t),
 	})
 	if err != nil {
 		t.Fatal(err)

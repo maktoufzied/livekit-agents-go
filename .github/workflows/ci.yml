@@ -16,8 +16,9 @@ permissions:
 
 env:
   NATIVE_DEPS: pkg-config libopus-dev libopusfile-dev libsoxr-dev
-  # The Silero VAD tests fail instead of skipping when ONNX Runtime is missing.
+  # The model tests fail instead of skipping when ONNX Runtime is missing.
   SILERO_REQUIRED: "1"
+  SMARTTURN_REQUIRED: "1"
 
 jobs:
   test:
@@ -29,7 +30,7 @@ jobs:
           go-version-file: go.mod
       - name: Native audio libraries
         run: sudo apt-get update && sudo apt-get install -y $NATIVE_DEPS
-      - name: ONNX Runtime (Silero VAD)
+      - name: ONNX Runtime (speech models)
         run: sudo scripts/install-onnxruntime.sh /usr/local/lib
       - name: Format
         run: |
@@ -61,7 +62,7 @@ jobs:
           go-version-file: go.mod
       - name: Native audio libraries
         run: sudo apt-get update && sudo apt-get install -y $NATIVE_DEPS
-      - name: ONNX Runtime (Silero VAD)
+      - name: ONNX Runtime (speech models)
         run: sudo scripts/install-onnxruntime.sh /usr/local/lib
       - name: Start LiveKit server
         run: |
@@ -95,7 +96,7 @@ jobs:
           go-version-file: go.mod
       - name: Native audio libraries
         run: sudo apt-get update && sudo apt-get install -y $NATIVE_DEPS
-      - name: ONNX Runtime (Silero VAD)
+      - name: ONNX Runtime (speech models)
         run: sudo scripts/install-onnxruntime.sh /usr/local/lib
       - name: End-to-end tests (real providers)
         env:

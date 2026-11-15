@@ -22,8 +22,9 @@ want to extend it, add a provider, or judge whether it fits their use.
 Dependency rules:
 
 - `stt`, `llm`, `tts`, `vad`, `audio` depend on nothing but the standard library.
-- `vad/silero` is the one model-backed detector. It uses cgo to call ONNX Runtime and
-  loads that library when `silero.New` runs, so nothing else pays for it.
+- `vad/silero` and `turn/smartturn` are the model-backed packages. They use cgo to call
+  ONNX Runtime and load that library when `New` runs, so nothing else pays for it.
+  `internal/onnxrt` loads it once for both.
 - Providers depend on those interface packages and on `providers` (errors, `Secret`).
   They never import the root package.
 - The root package depends on the interfaces and on the pure-Go part of the official
@@ -126,8 +127,15 @@ sentences and that incremental-input TTS APIs are not used to their full extent.
 | `TurnSTT` (default without a VAD) | The provider's end-of-speech event, or `MaxEndpointingDelay` after the last final transcript. |
 | `TurnManual` | Only `Session.CommitUserTurn`. |
 
-An optional `TurnDetector` is asked when the delay elapsed. A probability under the
-threshold postpones the turn end to `MaxEndpointingDelay` (3 s).
+An optional `TurnDetector` is asked as soon as the delay starts, off the loop, so its
+answer is ready when the delay ends. A probability under the threshold postpones the
+turn end to `MaxEndpointingDelay` (3 s); an error or a timeout does not.
+
+The detector receives the conversation and the audio of the turn. The input loop keeps
+the last 8 seconds of input. VAD events carry the input position they were raised at;
+with it the loop marks where the turn starts (200 ms before the first speech) and where
+the speech stopped (200 ms after it), and forgets the marks when the turn is committed
+or cleared. Nothing is buffered without a `TurnDetector`.
 
 ### Interruption
 

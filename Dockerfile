@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 #
 # Builds one example agent. The room audio path uses cgo (libopus, libsoxr),
-# so both stages need the native libraries. The Silero VAD loads ONNX Runtime
-# at startup; it is downloaded in the build stage and copied over.
+# so both stages need the native libraries. The speech models (Silero VAD, Smart
+# Turn) load ONNX Runtime at startup; it is downloaded in the build stage and copied over.
 #
 #   docker build -t livekit-agents-go-example .
 #   docker build --build-arg EXAMPLE=voice-assistant -t livekit-agents-go-voice .
