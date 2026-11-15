@@ -76,6 +76,9 @@ func (s *Session) runSpeech(sp *SpeechHandle) {
 		}
 	}
 	s.mu.Unlock()
+	if sp.preempt != nil {
+		sp.preempt.discard() // the speech never reached its first model step
+	}
 	s.emit(SpeechFinished{SpeechID: sp.id, Interrupted: interrupted, PlayedDuration: played, Err: err})
 	if interrupted && err == nil {
 		err = ErrInterrupted
@@ -185,17 +188,22 @@ func (s *Session) runReply(sp *SpeechHandle, p *pipeline) error {
 // retried only if it failed before producing any output.
 func (s *Session) runLLMStep(sp *SpeechHandle, p *pipeline, step int, choice llm.ToolChoice) (string, []llm.ToolCall, error) {
 	ctx := p.ctx
-	req := llm.Request{ToolChoice: choice}
-	if ins := strings.TrimSpace(s.opts.Agent.Instructions); ins != "" {
-		req.Messages = append(req.Messages, llm.Message{Role: llm.RoleSystem, Content: ins})
+	req := s.replyRequest(s.conv.Messages(), sp.instructions, choice)
+
+	// A request sent ahead of the end of the turn replaces the first
+	// attempt of the first step, if it is the request to send now.
+	var (
+		ahead    llm.Stream
+		aheadErr error
+		aheadOK  bool
+		aheadBy  time.Duration
+	)
+	if pre := sp.preempt; pre != nil {
+		sp.preempt = nil
+		if ahead, aheadErr, aheadOK = pre.take(ctx, req); aheadOK {
+			aheadBy = time.Since(sp.preemptAt)
+		}
 	}
-	req.Messages = append(req.Messages, s.conv.Messages()...)
-	if sp.instructions != "" {
-		req.Messages = append(req.Messages, llm.Message{Role: llm.RoleSystem, Content: sp.instructions})
-	}
-	// Tools are always declared, even with ToolChoiceNone: the history may
-	// reference them and some providers reject that otherwise.
-	req.Tools = s.specs
 
 	for attempt := 1; ; attempt++ {
 		var (
@@ -208,7 +216,14 @@ func (s *Session) runLLMStep(sp *SpeechHandle, p *pipeline, step int, choice llm
 			start = time.Now()
 			ttft  time.Duration
 		)
-		stream, err := s.opts.LLM.Chat(ctx, req)
+		var stream llm.Stream
+		var err error
+		if aheadOK {
+			stream, err, aheadOK = ahead, aheadErr, false
+		} else {
+			aheadBy = 0
+			stream, err = s.opts.LLM.Chat(ctx, req)
+		}
 		if err == nil {
 			timer := time.AfterFunc(s.opts.Timeouts.LLMFirstToken, func() {
 				if state.CompareAndSwap(firstWaiting, firstTimedOut) {
@@ -256,7 +271,7 @@ func (s *Session) runLLMStep(sp *SpeechHandle, p *pipeline, step int, choice llm
 						return text.String(), nil, perr
 					}
 				}
-				s.emit(MetricsCollected{Metric: LLMMetrics{SpeechID: sp.id, FirstToken: ttft, Duration: time.Since(start), Usage: usage, Attempts: attempt}})
+				s.emit(MetricsCollected{Metric: LLMMetrics{SpeechID: sp.id, FirstToken: ttft, Duration: time.Since(start), Usage: usage, Attempts: attempt, Preemptive: aheadBy}})
 				return text.String(), calls, nil
 			}
 			if state.Load() == firstTimedOut {

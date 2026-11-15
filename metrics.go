@@ -31,6 +31,10 @@ type LLMMetrics struct {
 	Duration   time.Duration
 	Usage      llm.Usage
 	Attempts   int
+	// Preemptive is how long before the reply started its model request
+	// was sent, when it was sent ahead of the end of the user turn; zero
+	// otherwise. FirstToken and Duration count from the start of the reply.
+	Preemptive time.Duration
 }
 
 // TTSMetrics measures the synthesis of one sentence.

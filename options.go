@@ -132,6 +132,12 @@ type TurnOptions struct {
 	// MinInterruptionWords additionally requires that many transcribed
 	// words before interrupting. Default 0 (disabled).
 	MinInterruptionWords int
+	// DisablePreemptiveGeneration stops the session from sending the model
+	// request when the user stops speaking, before the endpointing delay
+	// has elapsed. By default it does, so that the reply starts sooner; the
+	// request is thrown away, and paid for, when the user goes on speaking.
+	// Tools never run and nothing is recorded before the turn has ended.
+	DisablePreemptiveGeneration bool
 	// FalseInterruptionTimeout is how long the agent stays silent after a
 	// sound that interrupted it but was not followed by any transcript (a
 	// cough, a door, background voices). The speech is only paused when

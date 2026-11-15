@@ -80,7 +80,7 @@ identical behaviour to upstream.
 | False-interruption handling | Pause, then resume when no transcript follows (2 s) | Same idea, same default; see [ARCHITECTURE.md](ARCHITECTURE.md#interruption). Checked with fake providers only |
 | Adaptive interruption detection (model that tells backchannels from interruptions) | Yes | No |
 | History truncation on interruption | Aligned transcripts when the TTS provides them | Per sentence plus played fraction |
-| Preemptive generation | Yes | No |
+| Preemptive generation | Yes: model request, optionally synthesis too; skipped after 10 s of user speech | Model request only, on by default, at most 3 per turn; no limit on speech length. See [ARCHITECTURE.md](ARCHITECTURE.md#preemptive-generation) |
 | Tool calling | Yes | Yes |
 | Agent handoffs, tasks, workflows | Yes | No |
 | `Say`, `GenerateReply` | Yes | Yes |
@@ -238,7 +238,7 @@ Their unit tests use local servers that replay documented message shapes. The op
 | Milestone | Content |
 |---|---|
 | 0.2 Hardening | First managed deployment on LiveKit Cloud with `lkagent`. More real-voice testing (noise, echo, several languages). |
-| 0.3 Turn quality | Silero VAD: done. End-of-turn model (Smart Turn): done. False-interruption recovery: done. Preemptive generation. |
+| 0.3 Turn quality | Silero VAD: done. End-of-turn model (Smart Turn): done. False-interruption recovery: done. Preemptive generation: done. |
 | 0.4 Realtime | Wire `realtime.Model` into the session, with one provider. |
 | 0.5 Audio | Streaming-input TTS with aligned transcripts. Evaluate a cgo-free Opus path with `pion/opus`. |
 | Later | Handoffs and tasks, text input, telephony helpers, video, more providers, OpenTelemetry export, newer `protocol` messages (`GoAway`, join timing, job tokens). |

@@ -240,7 +240,7 @@ the server dispatches it to every new room.
 |---|---|
 | Worker | Registration, job requests, accept/reject, assignment, capacity and load reporting, reconnection with running-job report, graceful drain, job termination, panic isolation, HTTP health endpoint, hosted mode for LiveKit Cloud |
 | Audio | Subscribe to a participant, publish agent audio, Opus decode/encode and resampling (upstream helpers), paced playout with a bounded queue |
-| Turns | Silero VAD (model) and energy VAD, Smart Turn end-of-turn model, endpointing delays, STT-driven turns, manual turns, pluggable end-of-turn model interface |
+| Turns | Silero VAD (model) and energy VAD, Smart Turn end-of-turn model, endpointing delays, STT-driven turns, manual turns, pluggable end-of-turn model interface, model request sent ahead of the end of the turn |
 | Interruptions | Cancels LLM, TTS and tools, drops queued audio, records only what was played, no stale audio in the next turn. A sound without words only pauses the agent, which then resumes where it stopped |
 | Conversation | Role-based history, instructions, streaming replies, `Say`, `GenerateReply` |
 | Tools | Typed tools with generated JSON Schema, argument validation, timeouts, concurrent or sequential execution, model-visible errors, never retried |

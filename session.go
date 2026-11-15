@@ -77,6 +77,12 @@ type turnState struct {
 	held    *SpeechHandle
 	heldAt  time.Time
 	heldGen uint64 // invalidates pending resume timers
+
+	// preempt is the model request started ahead of the end of the turn;
+	// nil when none. preemptCount counts those started in this turn.
+	preempt      *preemptive
+	preemptAt    time.Time
+	preemptCount int
 }
 
 // NewSession validates the options and returns an idle session.
@@ -359,6 +365,8 @@ func (s *Session) ClearUserTurn() {
 		s.post(func() {
 			s.turn.finals, s.turn.interim = nil, ""
 			s.turn.eouGen++
+			s.turn.preemptCount = 0
+			s.dropPreemptive()
 			s.resetTurnAudio()
 		})
 	}
@@ -953,6 +961,10 @@ func (s *Session) armEOU(d time.Duration) {
 		s.commitUserTurn()
 	}
 
+	if !t.eouExtended {
+		// The reply is prepared during the delay too.
+		s.preempt()
+	}
 	if ask {
 		// The model runs during the delay, so that its answer costs no time
 		// when the user is done, and off the loop: it must not stall audio.
@@ -995,6 +1007,12 @@ func (s *Session) commitUserTurn() {
 	t.eouGen++
 	t.wantInterrupt = false
 	s.resetTurnAudio()
+	pre := t.preempt
+	t.preempt, t.preemptCount = nil, 0
+	if pre != nil && pre.text != text {
+		pre.discard()
+		pre = nil
+	}
 	if text == "" {
 		return
 	}
@@ -1015,7 +1033,15 @@ func (s *Session) commitUserTurn() {
 		allowInterruptions: !s.opts.Turn.DisableInterruptions,
 		addToHistory:       true,
 		userMsg:            &msg,
-	}); err != nil && !errors.Is(err, ErrSessionClosed) {
+		preempt:            pre,
+		preemptAt:          t.preemptAt,
+	}); err != nil {
+		if pre != nil {
+			pre.discard()
+		}
+		if errors.Is(err, ErrSessionClosed) {
+			return
+		}
 		// No reply will run (queue full): keep what the user said.
 		s.commit(msg)
 		s.reportError(SourceLLM, fmt.Errorf("queue reply: %w", err), true)

@@ -25,6 +25,10 @@ type SpeechHandle struct {
 	// the history when the speech reaches the head of the queue.
 	userMsg   *llm.Message
 	createdAt time.Time
+	// preempt is the model request started before the turn ended, if any.
+	// The speech goroutine takes it for the first model step or discards it.
+	preempt   *preemptive
+	preemptAt time.Time
 
 	interrupted   atomic.Bool
 	interruptOnce sync.Once

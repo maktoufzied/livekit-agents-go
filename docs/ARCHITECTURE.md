@@ -137,6 +137,32 @@ with it the loop marks where the turn starts (200 ms before the first speech) an
 the speech stopped (200 ms after it), and forgets the marks when the turn is committed
 or cleared. Nothing is buffered without a `TurnDetector`.
 
+### Preemptive generation
+
+The model request is sent when the user stops speaking, not when the turn ends, so the
+wait for the first token overlaps the endpointing delay.
+
+```
+final transcript, user silent ─► send the model request ─┐ (nothing recorded, no tool runs)
+                                                         │
+turn ends (delay elapsed) ─► reply starts ─► same request as the one to send now?
+                                               ├─ yes ─► read its stream: first token already there
+                                               └─ no  ─► cancel it, send a new one
+```
+
+The request is kept only if it is exactly the request the reply would send: same
+history, same user text, same tools. It is thrown away when the user goes on speaking
+(new transcript), when the history changed in between, or when the turn is cleared. It
+is not started while a speech is running or queued, because the history is about to
+change, and at most three are started per turn. A failure of the request counts as the
+first attempt of the reply, with the usual retry rules. `LLMMetrics.Preemptive` tells how
+far ahead the request was sent. `TurnOptions.DisablePreemptiveGeneration` turns it off;
+a request that is thrown away is still billed by the provider.
+
+Measured on 2026-11-14 with Deepgram and Anthropic (`claude-haiku-5-5`), three
+runs each of the live pipeline test: first audio 0.58 s, 0.66 s and 0.97 s after the end
+of the turn with it, 1.13 s, 1.19 s and 1.57 s without.
+
 ### Interruption
 
 The user interrupts when the VAD hears `MinInterruptionDuration` (500 ms) of speech
