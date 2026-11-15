@@ -329,26 +329,28 @@ func BenchmarkProcess(b *testing.B) {
 	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/20e6*100, "%realtime")
 }
 
-// The detector reproduces the upstream Python plugin on the test clip: the
-// raw model output of every window, the smoothed probability and the speech
-// boundaries. testdata/reference.txt was produced by testdata/reference.py
-// with livekit-plugins-silero 1.8.12.
-func TestMatchesUpstreamPlugin(t *testing.T) {
-	const tolerance = 1e-3
+// refEvent is a speech boundary as the upstream plugin reports it.
+type refEvent struct {
+	kind            string // "start" or "end"
+	samples         int    // position at the model rate
+	speech, silence float64
+}
 
-	raw, err := os.ReadFile(filepath.Join("testdata", "reference.txt"))
+// reference is the output of testdata/reference.py for one clip.
+type reference struct {
+	raw      []float64 // model output per window; 16 kHz clips only
+	smoothed []float64 // filtered probability per window
+	events   []refEvent
+}
+
+func readReference(t testing.TB, path string) reference {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	type refEvent struct {
-		kind            string
-		samples         int
-		speech, silence float64
-		prob            float64
-	}
-	var wantRaw, wantSmoothed []float64
-	var wantEvents []refEvent
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+	var ref reference
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		fields := strings.Fields(line)
 		switch fields[0] {
 		case "raw":
@@ -356,84 +358,66 @@ func TestMatchesUpstreamPlugin(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantRaw = append(wantRaw, p)
+			ref.raw = append(ref.raw, p)
 		case "ev":
 			var ev refEvent
-			if _, err := fmt.Sscan(strings.Join(fields[1:], " "), &ev.kind, &ev.samples, &ev.speech, &ev.silence, &ev.prob); err != nil {
+			var prob float64
+			if _, err := fmt.Sscan(strings.Join(fields[1:], " "), &ev.kind, &ev.samples, &ev.speech, &ev.silence, &prob); err != nil {
 				t.Fatal(err)
 			}
 			if ev.kind == "inference" {
-				wantSmoothed = append(wantSmoothed, ev.prob)
+				ref.smoothed = append(ref.smoothed, prob)
 			} else {
-				wantEvents = append(wantEvents, ev)
+				ref.events = append(ref.events, ev)
 			}
 		}
 	}
-	if len(wantRaw) == 0 || len(wantSmoothed) != len(wantRaw) || len(wantEvents) == 0 {
-		t.Fatalf("reference: %d raw, %d smoothed, %d events", len(wantRaw), len(wantSmoothed), len(wantEvents))
+	if len(ref.smoothed) == 0 || len(ref.events) == 0 {
+		t.Fatalf("%s: %d windows, %d events", path, len(ref.smoothed), len(ref.events))
 	}
+	return ref
+}
 
-	v := load(t, Options{})
-	m, err := newOnnxModel(v.session, 16000)
+// analyze runs a detector over mono PCM16 in 20 ms frames, as the reference
+// script does, and returns the same quantities.
+func analyze(t testing.TB, v *VAD, pcm []int16, rate int) reference {
+	t.Helper()
+	m, err := newOnnxModel(v.session, v.opts.SampleRate)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Record what the model returns while the detector drives it.
 	rec := &recordingModel{model: m}
 	d := newDetector(v.opts, rec)
 	defer d.Close()
 
-	speech := clip(t)
-	var gotSmoothed []float64
-	var gotEvents []refEvent
-	const per = 320 // 20 ms frames, as the reference script feeds them
-	for i := 0; i < len(speech.Data); i += per {
+	var got reference
+	per := rate / 50
+	for i := 0; i < len(pcm); i += per {
 		before := len(rec.probs)
-		events, err := d.Process(audio.Frame{Data: speech.Data[i:min(i+per, len(speech.Data))], SampleRate: 16000, Channels: 1})
+		events, err := d.Process(audio.Frame{Data: pcm[i:min(i+per, len(pcm))], SampleRate: rate, Channels: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(rec.probs) > before {
-			gotSmoothed = append(gotSmoothed, d.prob)
+		// At most one window completes per 20 ms frame, except when
+		// upsampling 8 kHz input; the smoothed value is then the last one.
+		for n := before; n < len(rec.probs); n++ {
+			got.smoothed = append(got.smoothed, d.prob)
 		}
 		for _, ev := range events {
 			kind := "start"
 			if ev.Type == vad.SpeechEnd {
 				kind = "end"
 			}
-			gotEvents = append(gotEvents, refEvent{
-				kind: kind, samples: len(rec.probs) * 512,
+			got.events = append(got.events, refEvent{
+				kind: kind, samples: len(rec.probs) * d.window,
 				speech: ev.SpeechDuration.Seconds(), silence: ev.SilenceDuration.Seconds(),
 			})
 		}
 	}
-
-	if len(rec.probs) != len(wantRaw) {
-		t.Fatalf("windows = %d, want %d", len(rec.probs), len(wantRaw))
+	for _, p := range rec.probs {
+		got.raw = append(got.raw, float64(p))
 	}
-	var worstRaw, worstSmoothed float64
-	for i := range wantRaw {
-		worstRaw = max(worstRaw, math.Abs(float64(rec.probs[i])-wantRaw[i]))
-		worstSmoothed = max(worstSmoothed, math.Abs(gotSmoothed[i]-wantSmoothed[i]))
-	}
-	t.Logf("%d windows: largest difference %.2g (model output), %.2g (smoothed)", len(wantRaw), worstRaw, worstSmoothed)
-	if worstRaw > tolerance {
-		t.Errorf("model output differs from upstream by up to %.4f", worstRaw)
-	}
-	if worstSmoothed > tolerance {
-		t.Errorf("smoothed probability differs from upstream by up to %.4f", worstSmoothed)
-	}
-
-	if len(gotEvents) != len(wantEvents) {
-		t.Fatalf("events = %+v, want %+v", gotEvents, wantEvents)
-	}
-	for i, want := range wantEvents {
-		got := gotEvents[i]
-		if got.kind != want.kind || got.samples != want.samples ||
-			math.Abs(got.speech-want.speech) > 1e-6 || math.Abs(got.silence-want.silence) > 1e-6 {
-			t.Errorf("event %d = %+v, want %+v", i, got, want)
-		}
-	}
+	return got
 }
 
 type recordingModel struct {
@@ -445,4 +429,63 @@ func (r *recordingModel) infer(window []float32) (float32, error) {
 	p, err := r.model.infer(window)
 	r.probs = append(r.probs, p)
 	return p, err
+}
+
+func maxDiff(a, b []float64) float64 {
+	var worst float64
+	for i := range min(len(a), len(b)) {
+		worst = max(worst, math.Abs(a[i]-b[i]))
+	}
+	return worst
+}
+
+func readPCM(t testing.TB, path string) []int16 {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return audio.FromBytesLE(raw, audio.Format{SampleRate: 16000, Channels: 1}).Data
+}
+
+// The detector reproduces the upstream Python plugin: the raw model output
+// of every window, the smoothed probability and the speech boundaries. The
+// references were produced by testdata/reference.py with
+// livekit-plugins-silero 1.8.12. Both clips are 16 kHz, so neither side
+// resamples and the comparison is exact up to the 6 decimals of the files.
+//
+//   - speech_16k: a synthesized sentence between stretches of digital silence.
+//   - apollo11_16k: Neil Armstrong on the lunar surface, 1969 (NASA, public
+//     domain): a real voice over radio noise, with pauses and a beep.
+func TestMatchesUpstreamPlugin(t *testing.T) {
+	const tolerance = 1e-3
+	for _, name := range []string{"speech_16k", "apollo11_16k"} {
+		t.Run(name, func(t *testing.T) {
+			want := readReference(t, filepath.Join("testdata", name+".reference.txt"))
+			got := analyze(t, load(t, Options{}), readPCM(t, filepath.Join("testdata", name+".pcm")), 16000)
+
+			if len(got.raw) != len(want.raw) || len(got.smoothed) != len(want.smoothed) {
+				t.Fatalf("windows = %d, want %d", len(got.raw), len(want.raw))
+			}
+			worstRaw, worstSmoothed := maxDiff(got.raw, want.raw), maxDiff(got.smoothed, want.smoothed)
+			t.Logf("%d windows, %d events: largest difference %.2g (model output), %.2g (smoothed)",
+				len(want.raw), len(want.events), worstRaw, worstSmoothed)
+			if worstRaw > tolerance {
+				t.Errorf("model output differs from upstream by up to %.4f", worstRaw)
+			}
+			if worstSmoothed > tolerance {
+				t.Errorf("smoothed probability differs from upstream by up to %.4f", worstSmoothed)
+			}
+			if len(got.events) != len(want.events) {
+				t.Fatalf("events = %+v, want %+v", got.events, want.events)
+			}
+			for i, w := range want.events {
+				g := got.events[i]
+				if g.kind != w.kind || g.samples != w.samples ||
+					math.Abs(g.speech-w.speech) > 1e-6 || math.Abs(g.silence-w.silence) > 1e-6 {
+					t.Errorf("event %d = %+v, want %+v", i, g, w)
+				}
+			}
+		})
+	}
 }

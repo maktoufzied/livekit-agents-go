@@ -128,12 +128,27 @@ Checked: on a synthesized sentence the start is reported 64 ms after the first w
 the end 576 ms after the last one; silence, a 440 Hz tone, white noise and keyboard-like
 clicks produce no event; the pipeline test with live providers passes with it.
 
-Compared with the Python plugin on the same 6.3 s clip (`TestMatchesUpstreamPlugin`,
-reference from `vad/silero/testdata/reference.py` with `livekit-plugins-silero` 1.8.12
-and ONNX Runtime 1.32.0): over 196 windows the model output and the smoothed probability
-differ by at most 0.000001, and the start and end events fall on the same sample with
-the same durations. Not checked: input that needs resampling was not compared with
-upstream, and no noisy real-room recording was tested.
+Compared with the Python plugin (`livekit-plugins-silero` 1.8.12, ONNX Runtime 1.32.0)
+on 2026-11-14. Both sides were fed the same audio in 20 ms frames.
+
+| Clip | Input rate | Windows | Largest probability difference | Speech boundaries |
+|---|---|---|---|---|
+| Synthesized sentence, 6.3 s | 16 kHz | 196 | 0.000001 | 2 of 2 identical |
+| Apollo 11, Neil Armstrong on the Moon (NASA, public domain): real voice over radio noise, 13 s | 16 kHz | 405 | 0.000001 | 7 of 7 identical |
+| Silero's own test recording, 60 s | 16 kHz | 1875 | 0.000002 | 13 of 13 identical |
+| Apollo 11 | 44.1 kHz | 405 | 0.20 | 7 of 7 identical |
+| Apollo 11 | 48 kHz | 405 | 0.07 | 6 of 7 identical, one end 32 ms earlier |
+| Apollo 11 | 8 kHz, model at 16 kHz | 405 | 0.26 | 5 of 7 identical, two ends 32 ms earlier |
+
+At 16 kHz neither side resamples and the results are the same to the precision of the
+reference files. `roomio` delivers 16 kHz by default, so this is the path a room agent
+uses. At other rates the two resamplers differ (libsoxr upstream, averaging or linear
+interpolation here): probabilities move on some windows, every start of speech stays on
+the same window, and an end of speech can move by one window (32 ms).
+
+The first two rows are kept as a test, `TestMatchesUpstreamPlugin`, with references
+from `vad/silero/testdata/reference.py`. The other rows were one-off runs. Not checked:
+a recording from a noisy room with several speakers or music.
 
 ## Provider notes
 
