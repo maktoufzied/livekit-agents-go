@@ -32,6 +32,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y $NATIVE_DEPS
       - name: ONNX Runtime (speech models)
         run: sudo scripts/install-onnxruntime.sh /usr/local/lib
+      # The unquantized Smart Turn model gives the same numbers on every
+      # processor, unlike the embedded one: it is the strict comparison with
+      # the reference implementation.
+      - name: Unquantized Smart Turn model
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/smart-turn-fp32.onnx" \
+            https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-gpu.onnx
+          echo "ab8dc64b88713f90b571c15b714bd1330e6c883cad8763dacf65c9376dc539be  $RUNNER_TEMP/smart-turn-fp32.onnx" | sha256sum -c -
+          echo "SMARTTURN_FP32_MODEL=$RUNNER_TEMP/smart-turn-fp32.onnx" >> "$GITHUB_ENV"
       - name: Format
         run: |
           out="$(gofmt -l .)"

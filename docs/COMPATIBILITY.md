@@ -209,8 +209,14 @@ The first, third and fourth rows of the comparison are kept as tests
 `SMARTTURN_FP32_MODEL` points at the unquantized model. The session behaviour is
 `TestSessionWaitsForUnfinishedSentence`. References come from
 `turn/smartturn/testdata/reference.py`. Not checked: recordings of real people
-hesitating (the two sentences are synthesized voices), other languages, a live call,
-and the embedded model on x86 before the first CI run.
+hesitating (the two sentences are synthesized voices), other languages and a live call.
+
+The numbers above are from arm64 (Apple M4). ONNX Runtime computes 8-bit models
+differently on x86: on the CI machine (Linux amd64) the embedded model gives the same
+value as the arm64 reference on 10 of the 28 cases and decides differently on 3 of the
+unclear ones (cuts in the middle of a sentence). The clear cases, the two test sentences
+and the session behaviour are the same on both. The unquantized model is compared on
+both platforms and CI downloads it for that.
 
 ## Provider notes
 
