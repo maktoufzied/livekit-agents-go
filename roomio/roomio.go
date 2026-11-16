@@ -70,6 +70,10 @@ type Options struct {
 	// OnParticipant, when set, is called by Run once the participant the
 	// agent listens to has joined. Use it to greet the user.
 	OnParticipant func(ctx context.Context, session *agents.Session, identity string)
+	// InputTap, when set, is given every frame of the participant's audio
+	// as the session reads it, inserted silence included. It is meant for
+	// recording and debugging, runs on the audio path and must not block.
+	InputTap func(audio.Frame)
 	// ConnectOptions are passed to the Go SDK when joining the room.
 	ConnectOptions []lksdk.ConnectOption
 	// Logger defaults to slog.Default().
@@ -252,7 +256,26 @@ func (r *Bridge) Start(room *lksdk.Room, format audio.Format) error {
 }
 
 // Input is the session's audio input.
-func (r *Bridge) Input() agents.AudioInput { return r.in }
+func (r *Bridge) Input() agents.AudioInput {
+	if r.opts.InputTap != nil {
+		return tappedInput{r.in, r.opts.InputTap}
+	}
+	return r.in
+}
+
+// tappedInput shows every frame read to a tap.
+type tappedInput struct {
+	*input
+	tap func(audio.Frame)
+}
+
+func (t tappedInput) ReadFrame(ctx context.Context) (audio.Frame, error) {
+	f, err := t.input.ReadFrame(ctx)
+	if err == nil {
+		t.tap(f)
+	}
+	return f, err
+}
 
 // Output is the session's audio output. It is nil before Start.
 func (r *Bridge) Output() agents.AudioOutput {

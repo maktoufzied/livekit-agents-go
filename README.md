@@ -105,7 +105,7 @@ This exact program is [`examples/quickstart`](examples/quickstart). More:
 | `turn/smartturn` | Smart Turn end-of-turn model on ONNX Runtime | **yes**, library loaded at run time |
 | `audio` | PCM frame type and helpers | no |
 | `roomio` | LiveKit room audio in/out, agent state and transcripts | **yes** |
-| `providers/deepgram` | Streaming STT (WebSocket), TTS (REST) | no |
+| `providers/deepgram` | Streaming STT (WebSocket), streaming TTS (WebSocket) and TTS over REST | no |
 | `providers/anthropic` | LLM (Messages API, streaming, tools) | no |
 | `providers/openai` | LLM (Chat Completions, also OpenAI-compatible servers), TTS | no |
 | `agentstest` | Deterministic STT, LLM, TTS and audio I/O for tests | no |
@@ -300,7 +300,7 @@ Not implemented in this version:
   is the alternative).
 - Agent handoffs, multi-agent workflows, task groups.
 - Telephony helpers (SIP, DTMF, voicemail detection), background audio.
-- Word-level transcript alignment: history is cut per sentence and by played fraction.
+- Word-level transcript alignment: after an interruption the history is cut by played duration and speaking rate.
 - Process isolation and prewarming of jobs.
 - More providers; noise cancellation.
 

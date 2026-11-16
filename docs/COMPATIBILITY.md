@@ -80,7 +80,7 @@ identical behaviour to upstream.
 | False-interruption handling | Pause on 0.5 s of sound; a final transcript or the end of the turn interrupts; resume 2 s after the sound stops otherwise | Same rules and defaults, read from `agent_activity.py` of 1.8.12; see [ARCHITECTURE.md](ARCHITECTURE.md#interruption) |
 | Echo warm-up (`aec_warmup_duration`) | 3 s from the first agent speech: no interruption, silence to the recognizer | Same, `TurnOptions.EchoWarmup` |
 | Adaptive interruption detection (model that tells backchannels from interruptions) | Yes | No |
-| History truncation on interruption | Aligned transcripts when the TTS provides them | Per sentence plus played fraction |
+| History truncation on interruption | Aligned transcripts when the TTS provides them, speaking-rate estimate otherwise | Speaking-rate estimate with a streaming TTS; per sentence plus played fraction with a plain one. No aligned transcripts |
 | Preemptive generation | Yes: model request, optionally synthesis too; at most 3 per turn, skipped after 10 s of user speech | Model request only, on by default, same two limits. See [ARCHITECTURE.md](ARCHITECTURE.md#preemptive-generation) |
 | Endpointing delay | 0.5 s to 3 s, counted from the end of the speech | Same |
 | Audio while the user is silent | Continuous: the WebRTC audio stack fills what the browser does not send (Opus DTX) | Continuous: `roomio` inserts silence when the received audio falls 100 ms behind real time |
@@ -112,7 +112,7 @@ identical behaviour to upstream.
 | Endpointing defaults | 0.5 s min, 3 s max | Same |
 | Interruption default | 0.5 s of speech, 0 words | Same |
 | Tool steps per turn | 3 | 3 |
-| TTS input | Streaming when the provider supports it | One request per sentence |
+| TTS input | Streaming when the provider supports it | Same: text streamed to a `tts.Streamer` (Deepgram), one request per sentence otherwise (OpenAI) |
 
 ## Silero VAD
 
@@ -238,7 +238,7 @@ Their unit tests use local servers that replay documented message shapes. The op
 | Provider | API | Notes |
 |---|---|---|
 | Deepgram STT | `wss://api.deepgram.com/v1/listen` | Default model `nova-3`. Interim and final results, `SpeechStarted`, `speech_final` and `UtteranceEnd` mapped to end of speech, `KeepAlive`, `CloseStream`. Single channel only. |
-| Deepgram TTS | `POST /v1/speak`, `linear16`, no container | Default voice `aura-2-thalia-en`, 24 kHz. Streams the response body. |
+| Deepgram TTS | `wss://…/v1/speak` for the session (`SynthesizeStream`), `POST /v1/speak` for `Synthesize`; `linear16` | Default voice `aura-2-thalia-en`, 24 kHz. The streaming path follows `livekit-plugins-deepgram` 1.8.12: pooled connection reused for up to an hour, text sent word by word, one `Flush` per model response (Deepgram allows 20 per minute), `Flush` and `Close` sent before a connection is dropped. Measured on 2026-11-15: first audio 0.15 s after the text on a reused connection, against 0.39 to 0.53 s for a REST request after a few seconds of idle. |
 | Anthropic LLM | `POST /v1/messages`, streaming | Default model `claude-opus-5-5` with low effort. For a lower time to first token set `Model` to `claude-sonnet-5-5` or `claude-haiku-5-5`. Sends a server-side refusal fallback option with a beta header on recent models; disable it with `DisableRefusalFallback` behind gateways. Forced tool use falls back to a system instruction on models that reject it. |
 | OpenAI LLM | `POST /chat/completions`, streaming | Works with OpenAI-compatible servers through `BaseURL`. Default model `gpt-6-luna` with `reasoning_effort: "none"`, which that model needs for tool calls on this endpoint. |
 | OpenAI TTS | `POST /audio/speech`, `pcm` | 24 kHz mono. OpenAI lists every model of this endpoint for shutdown on 2027-01-06; prefer Deepgram TTS for new work. |
@@ -250,5 +250,5 @@ Their unit tests use local servers that replay documented message shapes. The op
 | 0.2 Hardening | First managed deployment on LiveKit Cloud with `lkagent`. More real-voice testing (noise, echo, several languages). |
 | 0.3 Turn quality | Silero VAD: done. End-of-turn model (Smart Turn): done. False-interruption recovery: done. Preemptive generation: done. |
 | 0.4 Realtime | Wire `realtime.Model` into the session, with one provider. |
-| 0.5 Audio | Streaming-input TTS with aligned transcripts. Evaluate a cgo-free Opus path with `pion/opus`. |
+| 0.5 Audio | Streaming-input TTS: done (Deepgram). Aligned transcripts. Evaluate a cgo-free Opus path with `pion/opus`. |
 | Later | Handoffs and tasks, text input, telephony helpers, video, more providers, OpenTelemetry export, newer `protocol` messages (`GoAway`, join timing, job tokens). |

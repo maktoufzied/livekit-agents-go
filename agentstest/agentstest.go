@@ -5,6 +5,7 @@ package agentstest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -464,6 +465,210 @@ func (s *ttsStream) Recv() (audio.Frame, error) {
 }
 
 func (s *ttsStream) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.closed)
+		s.parent.mu.Lock()
+		s.parent.open--
+		s.parent.mu.Unlock()
+	})
+	return nil
+}
+
+// StreamTTS is a fake TTS that also accepts text incrementally, like a
+// provider with a streaming connection. It produces PerChar of audio for
+// every character pushed, as the text arrives. All frames of one stream
+// carry the same Marker.
+type StreamTTS struct {
+	*TTS
+	// FailOpens makes the next SynthesizeStream calls fail, in order; a nil
+	// entry lets that call succeed.
+	FailOpens []error
+	// FailRecvs makes the first Recv of the next streams fail, in order; a
+	// nil entry lets that stream work.
+	FailRecvs []error
+
+	smu      sync.Mutex
+	streams  int
+	prewarms int
+}
+
+// NewStreamTTS returns a fake streaming TTS with defaults.
+func NewStreamTTS() *StreamTTS { return &StreamTTS{TTS: NewTTS()} }
+
+var _ tts.Streamer = (*StreamTTS)(nil)
+
+// Prewarm implements tts.Prewarmer.
+func (t *StreamTTS) Prewarm() {
+	t.smu.Lock()
+	t.prewarms++
+	t.smu.Unlock()
+}
+
+// Prewarms returns how many times Prewarm was called.
+func (t *StreamTTS) Prewarms() int {
+	t.smu.Lock()
+	defer t.smu.Unlock()
+	return t.prewarms
+}
+
+// Streams returns how many streams were opened.
+func (t *StreamTTS) Streams() int {
+	t.smu.Lock()
+	defer t.smu.Unlock()
+	return t.streams
+}
+
+// SynthesizeStream implements tts.Streamer.
+func (t *StreamTTS) SynthesizeStream(ctx context.Context) (tts.InputStream, error) {
+	t.smu.Lock()
+	if len(t.FailOpens) > 0 {
+		err := t.FailOpens[0]
+		t.FailOpens = t.FailOpens[1:]
+		if err != nil {
+			t.smu.Unlock()
+			return nil, err
+		}
+	}
+	var recvErr error
+	if len(t.FailRecvs) > 0 {
+		recvErr = t.FailRecvs[0]
+		t.FailRecvs = t.FailRecvs[1:]
+	}
+	t.streams++
+	t.smu.Unlock()
+
+	t.mu.Lock()
+	t.marker++
+	t.open++
+	marker := t.marker
+	t.texts = append(t.texts, "")
+	index := len(t.texts) - 1
+	t.mu.Unlock()
+
+	frame := t.FrameDuration
+	if frame <= 0 {
+		frame = 20 * time.Millisecond
+	}
+	perChar := t.PerChar
+	if perChar <= 0 {
+		perChar = 20 * time.Millisecond
+	}
+	return &inputStream{
+		parent: t, ctx: ctx, marker: marker, index: index, frame: frame, perChar: perChar,
+		recvErr: recvErr, wake: make(chan struct{}, 1), closed: make(chan struct{}),
+	}, nil
+}
+
+type inputStream struct {
+	parent  *StreamTTS
+	ctx     context.Context
+	marker  int16
+	index   int
+	frame   time.Duration
+	perChar time.Duration
+	recvErr error
+
+	mu      sync.Mutex
+	chars   int
+	flushed bool
+	sent    int
+
+	wake      chan struct{}
+	closeOnce sync.Once
+	closed    chan struct{}
+}
+
+func (s *inputStream) signal() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *inputStream) Push(text string) error {
+	select {
+	case <-s.closed:
+		return fmt.Errorf("agentstest: %w", providers.ErrStreamClosed)
+	default:
+	}
+	s.mu.Lock()
+	if s.flushed {
+		s.mu.Unlock()
+		return errors.New("agentstest: Push after Flush")
+	}
+	s.chars += len(text)
+	s.mu.Unlock()
+	s.parent.mu.Lock()
+	s.parent.texts[s.index] += text
+	s.parent.mu.Unlock()
+	s.signal()
+	return nil
+}
+
+func (s *inputStream) Flush() error {
+	s.mu.Lock()
+	s.flushed = true
+	s.mu.Unlock()
+	s.signal()
+	return nil
+}
+
+func (s *inputStream) Recv() (audio.Frame, error) {
+	if s.recvErr != nil {
+		err := s.recvErr
+		s.recvErr = nil
+		return audio.Frame{}, err
+	}
+	for {
+		s.mu.Lock()
+		// Audio available for the text pushed so far; the last partial
+		// frame is only produced once the text is complete.
+		total := time.Duration(s.chars) * s.perChar
+		frames := int(total / s.frame)
+		if s.flushed {
+			frames = int((total + s.frame - 1) / s.frame)
+		}
+		ready, done := s.sent < frames, s.flushed && s.sent >= frames
+		first := s.sent == 0
+		s.mu.Unlock()
+		if done {
+			return audio.Frame{}, io.EOF
+		}
+		if ready {
+			d := s.parent.FrameDelay
+			if first {
+				d += s.parent.FirstFrameDelay
+			}
+			t := time.NewTimer(d)
+			select {
+			case <-t.C:
+			case <-s.closed:
+				t.Stop()
+				return audio.Frame{}, fmt.Errorf("agentstest: %w", providers.ErrStreamClosed)
+			case <-s.ctx.Done():
+				t.Stop()
+				return audio.Frame{}, s.ctx.Err()
+			}
+			s.mu.Lock()
+			s.sent++
+			s.mu.Unlock()
+			f := audio.Silence(s.parent.Format(), s.frame)
+			for i := range f.Data {
+				f.Data[i] = s.marker
+			}
+			return f, nil
+		}
+		select {
+		case <-s.wake:
+		case <-s.closed:
+			return audio.Frame{}, fmt.Errorf("agentstest: %w", providers.ErrStreamClosed)
+		case <-s.ctx.Done():
+			return audio.Frame{}, s.ctx.Err()
+		}
+	}
+}
+
+func (s *inputStream) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.closed)
 		s.parent.mu.Lock()

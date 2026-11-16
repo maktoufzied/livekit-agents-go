@@ -258,7 +258,13 @@ func testInterruption(t *testing.T, falseInterruptionTimeout time.Duration, word
 	if n := len(h.out.Frames()); n != framesAtInterrupt {
 		t.Fatalf("%d stale frames written after the interruption", n-framesAtInterrupt)
 	}
-	if h.llm.OpenStreams() != 0 || h.tts.OpenStreams() != 0 {
+	// The streams of the interrupted reply are closed. With a transcript
+	// pending, the request for the next reply may be open already.
+	wantLLM := 0
+	if words {
+		wantLLM = 1
+	}
+	if h.llm.OpenStreams() > wantLLM || h.tts.OpenStreams() != 0 {
 		t.Fatalf("provider streams leaked: llm=%d tts=%d", h.llm.OpenStreams(), h.tts.OpenStreams())
 	}
 

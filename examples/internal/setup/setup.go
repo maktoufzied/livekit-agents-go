@@ -3,14 +3,17 @@
 package setup
 
 import (
+	"bufio"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	agents "github.com/maktoufzied/livekit-agents-go"
 	"github.com/maktoufzied/livekit-agents-go/agentstest"
+	"github.com/maktoufzied/livekit-agents-go/audio"
 	"github.com/maktoufzied/livekit-agents-go/llm"
 	"github.com/maktoufzied/livekit-agents-go/providers/anthropic"
 	"github.com/maktoufzied/livekit-agents-go/providers/deepgram"
@@ -170,4 +173,31 @@ func LogMetrics(session *agents.Session, logger *slog.Logger) {
 			logger.Debug("metric", "kind", fmt.Sprintf("%T", m.Metric), "value", fmt.Sprintf("%+v", m.Metric))
 		}
 	})
+}
+
+// RecordInput returns a tap for roomio.Options.InputTap that writes the
+// user's audio, as the session hears it, to a file: raw PCM, 16-bit little
+// endian, mono, 16 kHz, named after the room, in the directory named by
+// the RECORD_INPUT environment variable. It returns nil when the variable
+// is not set. The recording is a debugging aid: it holds the user's voice.
+func RecordInput(room string, logger *slog.Logger) func(audio.Frame) {
+	dir := os.Getenv("RECORD_INPUT")
+	if dir == "" {
+		return nil
+	}
+	path := filepath.Join(dir, room+"-"+time.Now().Format("150405")+".pcm")
+	f, err := os.Create(path)
+	if err != nil {
+		logger.Warn("cannot record the input audio", "error", err)
+		return nil
+	}
+	logger.Info("recording the input audio", "path", path)
+	w := bufio.NewWriterSize(f, 64<<10)
+	var n int
+	return func(frame audio.Frame) {
+		_, _ = w.Write(frame.BytesLE())
+		if n++; n%50 == 0 { // about once per second
+			_ = w.Flush()
+		}
+	}
 }

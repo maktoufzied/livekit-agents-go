@@ -99,6 +99,29 @@ AudioInput ─► inputLoop ──VAD events────────────
 
 ### One speech
 
+The text of the model reaches the TTS in one of two ways, depending on the TTS.
+
+**Streaming TTS** (`tts.Streamer`, for example Deepgram): one stream per model response.
+This is what the Python framework does with a streaming TTS.
+
+```
+LLM stream ─► textCh ─► synthStream ─► tts.InputStream ─► segCh ─► playout ─► AudioOutput
+  (step n)   (bounded)    push each chunk,    audio as it is      one segment per response,
+                          flush at the end    produced            frames bounded
+```
+
+- Text is pushed as the model produces it and flushed when the response ends. The
+  provider keeps one connection open between replies, opened ahead when the session
+  starts (`tts.Prewarmer`), so a reply does not pay for a connection.
+- The audio carries no word timing. What was said, for transcripts and for the history
+  after an interruption, is derived from the played duration and the speaking rate: the
+  real rate once the synthesis of the response is complete, 15 characters per second
+  before.
+- A stream that fails before producing audio is reopened and given the text again,
+  within the retry limit.
+
+**Plain TTS** (only `tts.TTS`, for example OpenAI): one request per sentence.
+
 ```
 LLM stream ─► sentence splitter ─► textCh ─► synth ─► segCh ─► playout ─► AudioOutput
   (step n)        (bounded: Sentences)        │ (bounded: SynthesisLookahead)
@@ -106,18 +129,16 @@ LLM stream ─► sentence splitter ─► textCh ─► synth ─► segCh ─�
                                                  frames buffered per sentence (bounded)
 ```
 
-- The model's text is split into sentences. Each sentence is one TTS request.
 - `synth` may run a few sentences ahead of `playout`, never more.
+- The session knows exactly which audio belongs to which sentence.
+
+In both:
+
 - `playout` is the only goroutine writing to the output. `AudioOutput.WriteFrame`
   blocks while more than a small look-ahead is queued, which paces everything behind it.
 - When the model asks for tools, they run while the text of that step is still playing.
   The next model step starts once the tools returned and that text was handed to the
   output.
-
-Why one TTS request per sentence: the session then knows exactly which audio belongs to
-which text. That is what makes the history accurate after an interruption without
-word-level timestamps from the TTS provider. The cost is that prosody cannot span
-sentences and that incremental-input TTS APIs are not used to their full extent.
 
 ### Turn detection
 

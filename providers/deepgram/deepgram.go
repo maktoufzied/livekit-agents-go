@@ -1,6 +1,7 @@
 // Package deepgram implements the stt.STT and tts.TTS interfaces on top of
 // the Deepgram API: live streaming transcription over WebSocket
-// (/v1/listen) and text-to-speech over REST (/v1/speak).
+// (/v1/listen) and text-to-speech, streaming over WebSocket or one request
+// at a time over REST (/v1/speak).
 //
 // # Errors
 //

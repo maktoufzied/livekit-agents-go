@@ -15,6 +15,7 @@ import (
 	"github.com/maktoufzied/livekit-agents-go/llm"
 	"github.com/maktoufzied/livekit-agents-go/providers"
 	"github.com/maktoufzied/livekit-agents-go/stt"
+	"github.com/maktoufzied/livekit-agents-go/tts"
 	"github.com/maktoufzied/livekit-agents-go/vad"
 )
 
@@ -192,6 +193,9 @@ func (s *Session) Start(ctx context.Context, tr IO) error {
 	s.loopCh = make(chan func(), 256)
 	s.speechCh = make(chan *SpeechHandle, s.opts.Buffers.Speeches)
 	s.sttFrames = make(chan audio.Frame, s.opts.Buffers.STTFrames)
+	if pw, ok := s.opts.TTS.(tts.Prewarmer); ok {
+		pw.Prewarm() // open the connection before the first reply needs it
+	}
 	// Started under the lock so that a concurrent shutdown waits for them.
 	s.goRun(s.loop)
 	s.goRun(s.speechLoop)

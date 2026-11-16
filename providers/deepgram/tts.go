@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/maktoufzied/livekit-agents-go/audio"
 	"github.com/maktoufzied/livekit-agents-go/providers"
 	"github.com/maktoufzied/livekit-agents-go/tts"
@@ -61,7 +63,12 @@ type TTSOptions struct {
 type TTS struct {
 	opts   TTSOptions
 	format audio.Format
-	url    string
+	url    string // REST endpoint, for Synthesize
+
+	// Streaming: SynthesizeStream.
+	wsURL  string
+	dialer *websocket.Dialer
+	pool   *ttsPool
 }
 
 var _ tts.TTS = (*TTS)(nil)
@@ -106,10 +113,19 @@ func NewTTS(opts TTSOptions) (*TTS, error) {
 	q.Set("sample_rate", strconv.Itoa(opts.SampleRate))
 	q.Set("container", "none") // raw PCM, no WAV header
 	u.RawQuery = q.Encode()
+	restURL := u.String()
+
+	u.Scheme = "ws" + strings.TrimPrefix(u.Scheme, "http") // http → ws, https → wss
+	q.Del("container")
+	q.Set("mip_opt_out", "false")
+	u.RawQuery = q.Encode()
 	return &TTS{
 		opts:   opts,
 		format: audio.Format{SampleRate: opts.SampleRate, Channels: 1},
-		url:    u.String(),
+		url:    restURL,
+		wsURL:  u.String(),
+		dialer: &websocket.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: handshakeTimeout},
+		pool:   &ttsPool{},
 	}, nil
 }
 

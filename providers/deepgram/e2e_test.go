@@ -92,3 +92,55 @@ func TestE2ERoundTrip(t *testing.T) {
 		t.Errorf("transcript %q does not contain the spoken phrase", transcript)
 	}
 }
+
+// TestE2ETTSStream speaks through the streaming endpoint, twice on the same
+// connection.
+func TestE2ETTSStream(t *testing.T) {
+	if os.Getenv(apiKeyEnv) == "" {
+		t.Skip(apiKeyEnv + " not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	voice, err := NewTTS(TTSOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer voice.Close()
+	for _, text := range []string{"Hello, this is the first sentence. And here is a second one.", "This one reuses the connection."} {
+		start := time.Now()
+		st, err := voice.SynthesizeStream(ctx)
+		if err != nil {
+			t.Fatalf("SynthesizeStream: %v", err)
+		}
+		for _, word := range strings.SplitAfter(text, " ") {
+			if err := st.Push(word); err != nil {
+				t.Fatalf("Push: %v", err)
+			}
+		}
+		if err := st.Flush(); err != nil {
+			t.Fatalf("Flush: %v", err)
+		}
+		var first, total time.Duration
+		for {
+			f, err := st.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("Recv: %v", err)
+			}
+			if first == 0 {
+				first = time.Since(start)
+			}
+			total += f.Duration()
+		}
+		st.Close()
+		t.Logf("%q: first audio after %v, %v of audio", text, first.Round(time.Millisecond), total.Round(10*time.Millisecond))
+		if total < time.Second {
+			t.Fatalf("only %v of audio", total)
+		}
+	}
+	if voice.pool.size() != 1 {
+		t.Fatalf("pool holds %d connections, want the one that was reused", voice.pool.size())
+	}
+}

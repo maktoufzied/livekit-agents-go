@@ -13,6 +13,7 @@ import (
 	"github.com/maktoufzied/livekit-agents-go/audio"
 	"github.com/maktoufzied/livekit-agents-go/internal/segment"
 	"github.com/maktoufzied/livekit-agents-go/llm"
+	"github.com/maktoufzied/livekit-agents-go/tts"
 )
 
 // speechLoop executes speeches one at a time, in queue order. Because a
@@ -79,6 +80,11 @@ func (s *Session) runSpeech(sp *SpeechHandle) {
 	if sp.preempt != nil {
 		sp.preempt.discard() // the speech never reached its first model step
 	}
+	// A request could not be sent ahead while this speech was recording what
+	// it played; if the user said something meanwhile, it can now.
+	if s.ctx.Err() == nil {
+		s.post(s.preempt)
+	}
 	s.emit(SpeechFinished{SpeechID: sp.id, Interrupted: interrupted, PlayedDuration: played, Err: err})
 	if interrupted && err == nil {
 		err = ErrInterrupted
@@ -115,11 +121,8 @@ func errorSource(err error) ErrorSource {
 }
 
 func (s *Session) runSay(sp *SpeechHandle, p *pipeline) error {
-	sp2 := segment.New()
-	for _, sentence := range append(sp2.Push(sp.text), sp2.Flush()...) {
-		if err := p.push(0, sentence); err != nil {
-			break
-		}
+	if err := p.write(0, sp.text); err == nil {
+		_ = p.endStep(0)
 	}
 	err := p.finish()
 	if !sp.addToHistory {
@@ -213,7 +216,6 @@ func (s *Session) runLLMStep(sp *SpeechHandle, p *pipeline, step int, choice llm
 			usage llm.Usage
 			got   bool
 			state atomic.Int32 // firstWaiting → firstReceived | firstTimedOut
-			split = segment.New()
 			start = time.Now()
 			ttft  time.Duration
 		)
@@ -255,22 +257,15 @@ func (s *Session) runLLMStep(sp *SpeechHandle, p *pipeline, step int, choice llm
 					continue
 				}
 				text.WriteString(ch.Text)
-				for _, sentence := range split.Push(ch.Text) {
-					if err = p.push(step, sentence); err != nil {
-						break
-					}
-				}
-				if err != nil {
+				if err = p.write(step, ch.Text); err != nil {
 					break
 				}
 			}
 			timer.Stop()
 			_ = stream.Close()
 			if errors.Is(err, io.EOF) {
-				for _, sentence := range split.Flush() {
-					if perr := p.push(step, sentence); perr != nil {
-						return text.String(), nil, perr
-					}
+				if perr := p.endStep(step); perr != nil {
+					return text.String(), nil, perr
 				}
 				s.emit(MetricsCollected{Metric: LLMMetrics{SpeechID: sp.id, FirstToken: ttft, Duration: time.Since(start), Usage: usage, Attempts: attempt, Preemptive: aheadBy}})
 				return text.String(), calls, nil
@@ -408,22 +403,43 @@ func (s *Session) invokeTool(sp *SpeechHandle, call llm.ToolCall) (string, error
 // ---------------------------------------------------------------------------
 // Speech pipeline: sentences → synthesis → paced playout
 
+// seg is a piece of speech: one sentence with a plain TTS, the text of one
+// model response with a streaming TTS.
 type seg struct {
 	step   int
-	text   string
 	frames chan audio.Frame
+	// stream marks a segment fed incrementally: its text grows while its
+	// audio plays.
+	stream bool
 
 	mu       sync.Mutex
+	text     string
 	written  time.Duration // handed to the output
 	total    time.Duration // synthesized so far
 	complete bool          // synthesis finished successfully
+	// Streamed segments only: the sentences of text and where each starts,
+	// to report them as they are spoken.
+	split    *segment.Splitter
+	sents    []sentence
+	chars    int // characters covered by sents
+	reported int // sentences already reported
 }
+
+type sentence struct {
+	text string
+	at   int // offset of its first character in the segment text
+}
+
+// speechRate is the speaking rate assumed while the real one is unknown,
+// in characters per second.
+const speechRate = 15
 
 type pipeItem struct {
 	step    int
 	text    string
 	seg     *seg
 	barrier chan struct{}
+	flush   bool // streaming TTS: the text of the step is complete
 }
 
 // pipeline turns sentences into played audio for one speech.
@@ -437,6 +453,11 @@ type pipeline struct {
 	sp     *SpeechHandle
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// streamer is the TTS as a streaming one; nil with a plain TTS, which
+	// gets the text one sentence at a time, cut by split.
+	streamer tts.Streamer
+	split    *segment.Splitter
 
 	textCh    chan pipeItem
 	segCh     chan pipeItem
@@ -478,7 +499,13 @@ func newPipeline(s *Session, sp *SpeechHandle) *pipeline {
 		playDone:  make(chan struct{}),
 	}
 	p.ctx, p.cancel = context.WithCancel(sp.ctx)
-	go p.synth()
+	if st, ok := s.opts.TTS.(tts.Streamer); ok {
+		p.streamer = st
+		go p.synthStream()
+	} else {
+		p.split = segment.New()
+		go p.synth()
+	}
 	go p.playout()
 	return p
 }
@@ -503,11 +530,37 @@ func (p *pipeline) ctxErr() error {
 	return p.ctx.Err()
 }
 
-// push queues a sentence. It blocks when the sentence buffer is full, which
-// is how TTS and playback apply backpressure to the LLM stream.
-func (p *pipeline) push(step int, text string) error {
+// write adds text to speak, as it is produced. It blocks when the text
+// buffer is full, which is how TTS and playback apply backpressure to the
+// LLM stream.
+func (p *pipeline) write(step int, text string) error {
+	if p.streamer != nil {
+		return p.push(pipeItem{step: step, text: text})
+	}
+	for _, sentence := range p.split.Push(text) {
+		if err := p.push(pipeItem{step: step, text: sentence}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// endStep marks the end of the text of a step.
+func (p *pipeline) endStep(step int) error {
+	if p.streamer != nil {
+		return p.push(pipeItem{step: step, flush: true})
+	}
+	for _, sentence := range p.split.Flush() {
+		if err := p.push(pipeItem{step: step, text: sentence}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *pipeline) push(it pipeItem) error {
 	select {
-	case p.textCh <- pipeItem{step: step, text: text}:
+	case p.textCh <- it:
 		return nil
 	case <-p.ctx.Done():
 		return p.ctxErr()
@@ -619,18 +672,18 @@ func (p *pipeline) playedText(step int) string {
 			continue
 		}
 		sg.mu.Lock()
-		total, complete := sg.total, sg.complete
+		total, complete, text := sg.total, sg.complete, sg.text
 		sg.mu.Unlock()
 		if !complete {
 			// Synthesis was cut short: estimate the full length from a
-			// typical speaking rate of ~15 characters per second.
-			total = max(total, time.Duration(len(sg.text))*time.Second/15)
+			// typical speaking rate.
+			total = max(total, time.Duration(len(text))*time.Second/speechRate)
 		}
 		if total <= 0 || played[i] >= total {
-			parts = append(parts, sg.text)
+			parts = append(parts, text)
 			continue
 		}
-		if t := segment.TruncateWords(sg.text, float64(played[i])/float64(total)); t != "" {
+		if t := segment.TruncateWords(text, float64(played[i])/float64(total)); t != "" {
 			parts = append(parts, t)
 		}
 	}
@@ -784,6 +837,7 @@ func (p *pipeline) playSegment(sg *seg) {
 		select {
 		case f, ok = <-sg.frames:
 			if !ok {
+				p.reportSpoken(sg, true)
 				return
 			}
 		case <-changed:
@@ -803,6 +857,36 @@ func (p *pipeline) playSegment(sg *seg) {
 		if !p.deliver(sg, f) {
 			return
 		}
+		p.reportSpoken(sg, false)
+	}
+}
+
+// reportSpoken emits the transcript of the sentences of a streamed segment
+// whose audio has started, or of all of them when the segment is over. The
+// audio carries no word timing, so the position of a sentence is derived
+// from the speaking rate: the real one once the synthesis is complete, a
+// typical one before.
+func (p *pipeline) reportSpoken(sg *seg, all bool) {
+	if !sg.stream {
+		return
+	}
+	sg.mu.Lock()
+	rate := float64(speechRate)
+	if sg.complete && sg.total > 0 {
+		rate = float64(len(sg.text)) / sg.total.Seconds()
+	}
+	var due []string
+	for sg.reported < len(sg.sents) {
+		next := sg.sents[sg.reported]
+		if !all && sg.written.Seconds()*rate < float64(next.at) {
+			break
+		}
+		due = append(due, next.text)
+		sg.reported++
+	}
+	sg.mu.Unlock()
+	for _, text := range due {
+		p.s.emit(AgentTranscript{SpeechID: p.sp.id, Text: text})
 	}
 }
 
@@ -937,5 +1021,7 @@ func (p *pipeline) onFirstFrame(sg *seg) {
 			"since_turn_end", m.FirstAudio.Round(time.Millisecond), "since_user_stopped", m.SinceUserStopped.Round(time.Millisecond))
 		p.s.emit(MetricsCollected{Metric: m})
 	}
-	p.s.emit(AgentTranscript{SpeechID: p.sp.id, Text: sg.text})
+	if !sg.stream {
+		p.s.emit(AgentTranscript{SpeechID: p.sp.id, Text: sg.text})
+	}
 }
